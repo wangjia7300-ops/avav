@@ -11,7 +11,7 @@ export type SafeApiErrorDetails = {
 };
 
 const detailTokenPattern = /^[A-Za-z0-9_.-]{1,96}$/;
-const screenIdPattern = /^(?:main|detail)-\d{2}$/;
+const screenIdPattern = /^screen-\d{2}$/;
 const suspiciousSecretPattern =
   /(?:api[_-]?key|authorization|bearer|token|secret|password|sk-[A-Za-z0-9_-]+|ark-[A-Za-z0-9_-]+)/i;
 

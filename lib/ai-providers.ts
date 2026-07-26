@@ -47,16 +47,6 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
     visionNote: "取决于接入点是否开通视觉理解"
   },
   {
-    id: "deepseek",
-    name: "DeepSeek",
-    baseURL: "https://api.deepseek.com/v1",
-    models: ["deepseek-chat", "deepseek-reasoner"],
-    requiresAuth: true,
-    description: "国产高性价比文本模型，支持 OpenAI 兼容接口；当前预设模型不支持产品图片识别。",
-    visionSupport: "not_supported",
-    visionNote: "当前预设不支持图片理解"
-  },
-  {
     id: "anthropic",
     name: "Anthropic Claude",
     baseURL: "https://api.anthropic.com/v1",
@@ -65,16 +55,6 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
     description: "Claude 系列模型，支持图片理解，长文本和结构化输出能力强。",
     visionSupport: "supported",
     visionNote: "支持图片理解"
-  },
-  {
-    id: "moonshot",
-    name: "Moonshot (月之暗面)",
-    baseURL: "https://api.moonshot.cn/v1",
-    models: ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
-    requiresAuth: true,
-    description: "Kimi 文本模型，支持 OpenAI 兼容接口；当前预设模型不用于产品图片识别。",
-    visionSupport: "not_supported",
-    visionNote: "当前预设不支持图片理解"
   },
   {
     id: "zhipu",
@@ -393,7 +373,7 @@ function normalizeServiceError(error: unknown, providerName: string) {
 }
 
 function shouldTryNativeJsonSchema(config: AIProviderConfig) {
-  return ["openai", "deepseek", "moonshot", "zhipu", "custom"].includes(config.providerId);
+  return ["openai", "zhipu", "custom"].includes(config.providerId);
 }
 
 function supportsResponsesWebSearch(config: AIProviderConfig) {
@@ -1118,7 +1098,12 @@ export async function createChatCompletion(
     });
   }
 
-  throw normalizeServiceError(lastError, config.providerId);
+  throw normalizeServiceError(
+    lastError,
+    config.displayName ??
+      PRESET_PROVIDERS.find((preset) => preset.id === config.providerId)?.name ??
+      config.providerId
+  );
 }
 
 // ── Build provider config from env fallback ───────────────────────

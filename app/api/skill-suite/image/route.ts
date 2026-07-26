@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { parseImageProviderConfig } from "@/lib/image-providers";
 import { compileScreenImagePrompt } from "@/lib/skill-suite/prompts";
 import { generateImageFromPrompt } from "@/lib/services/generate-image-from-prompt";
-import { ServiceError } from "@/lib/services/errors";
+import { serializeApiError, ServiceError } from "@/lib/services/errors";
 import type {
   DetailScreen,
   EvidenceFact,
@@ -12,6 +12,8 @@ import type {
 
 export const maxDuration = 300;
 
+// 注意：幂等状态是进程内存级的，仅在单进程长驻部署下有效；
+// 多实例 / Serverless 需改用带 TTL 的外部存储。
 const inFlight = new Map<string, Promise<GeneratedImageAsset>>();
 const completedRequestIds = new Set<string>();
 
@@ -20,21 +22,6 @@ function jsonNoStore(body: unknown, status = 200) {
     status,
     headers: { "Cache-Control": "no-store, max-age=0" }
   });
-}
-
-function safeFailure(error: unknown) {
-  if (error instanceof ServiceError) {
-    return {
-      status: error.statusCode,
-      error: error.message,
-      code: error.code
-    };
-  }
-  return {
-    status: 500,
-    error: "生图失败，请检查独立生图模型配置后重试。",
-    code: "IMAGE_GENERATION_FAILED"
-  };
 }
 
 export async function POST(request: Request) {
@@ -125,11 +112,11 @@ export async function POST(request: Request) {
       }
     }
   } catch (error) {
-    const failure = safeFailure(error);
-    return jsonNoStore(
-      { success: false, error: failure.error, code: failure.code },
-      failure.status
+    const failure = serializeApiError(
+      error,
+      "生图失败，请检查独立生图模型配置后重试。"
     );
+    return jsonNoStore(failure.body, failure.status);
   }
 }
 

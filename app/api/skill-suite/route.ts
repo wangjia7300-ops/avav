@@ -30,6 +30,7 @@ import {
 } from "@/lib/services/openai-client";
 import type { ChatCompletionParams } from "@/lib/ai-providers";
 import { getEnvProviderConfig } from "@/lib/ai-providers";
+import { assertTrustedChatProviderConfig } from "@/lib/services/endpoint-guard";
 import { ServiceError } from "@/lib/services/errors";
 import type {
   AIProviderConfig,
@@ -117,9 +118,12 @@ function assertProviderConfig(value: unknown): asserts value is AIProviderConfig
   }
 }
 
-function resolveProviderConfig(value: unknown) {
+async function resolveProviderConfig(value: unknown) {
   if (value) {
     assertProviderConfig(value);
+    // 客户端可控的 baseURL 必须通过公开 HTTPS 端点校验（防 SSRF），
+    // 与生图链路的 assertPublicCustomEndpoint 保持同等防护。
+    await assertTrustedChatProviderConfig(value);
     return value;
   }
 
@@ -134,6 +138,89 @@ function resolveProviderConfig(value: unknown) {
     );
   }
   return envConfig;
+}
+
+const SKILL_SUITE_STAGES = ["research", "planning", "execution", "qa"] as const;
+const EXECUTION_MODES = ["A", "B", "D", "E"] as const;
+const MAX_BRIEF_FIELD_LENGTH = 2_000;
+const MAX_NOTES_LENGTH = 4_000;
+
+function assertRequestShape(body: unknown): asserts body is SkillSuiteRequest {
+  if (
+    !body ||
+    typeof body !== "object" ||
+    Array.isArray(body) ||
+    !SKILL_SUITE_STAGES.includes(
+      (body as { stage?: unknown }).stage as (typeof SKILL_SUITE_STAGES)[number]
+    )
+  ) {
+    throw new ServiceError("请求缺少合法的 stage 字段。", {
+      statusCode: 400,
+      code: "SKILL_SUITE_REQUEST_INVALID"
+    });
+  }
+
+  const candidate = body as Record<string, unknown>;
+
+  if (
+    candidate.stage === "research" &&
+    candidate.notes !== undefined &&
+    (typeof candidate.notes !== "string" ||
+      candidate.notes.length > MAX_NOTES_LENGTH)
+  ) {
+    throw new ServiceError(`notes 必须是不超过${MAX_NOTES_LENGTH}字的字符串。`, {
+      statusCode: 400,
+      code: "SKILL_SUITE_REQUEST_INVALID"
+    });
+  }
+
+  if (candidate.stage === "planning") {
+    const brief = candidate.brief;
+    if (!brief || typeof brief !== "object" || Array.isArray(brief)) {
+      throw new ServiceError("brief 必须是对象。", {
+        statusCode: 400,
+        code: "SKILL_SUITE_REQUEST_INVALID"
+      });
+    }
+    for (const [key, fieldValue] of Object.entries(brief)) {
+      if (
+        typeof fieldValue !== "string" ||
+        fieldValue.length > MAX_BRIEF_FIELD_LENGTH
+      ) {
+        throw new ServiceError(
+          `brief.${key} 必须是不超过${MAX_BRIEF_FIELD_LENGTH}字的字符串。`,
+          {
+            statusCode: 400,
+            code: "SKILL_SUITE_REQUEST_INVALID"
+          }
+        );
+      }
+    }
+  }
+
+  if (
+    candidate.stage === "execution" &&
+    !EXECUTION_MODES.includes(
+      candidate.mode as (typeof EXECUTION_MODES)[number]
+    )
+  ) {
+    throw new ServiceError("mode 必须是 A / B / D / E 之一。", {
+      statusCode: 400,
+      code: "SKILL_SUITE_REQUEST_INVALID"
+    });
+  }
+
+  if (
+    candidate.stage === "qa" &&
+    (!candidate.executions ||
+      typeof candidate.executions !== "object" ||
+      Array.isArray(candidate.executions))
+  ) {
+    throw new ServiceError("executions 必须是以 screenId 为键的对象。", {
+      statusCode: 400,
+      code: "SKILL_SUITE_REQUEST_INVALID"
+    });
+  }
 }
 
 function safeError(error: unknown) {
@@ -195,7 +282,7 @@ async function complete(
   maxTokens: number,
   options: Pick<
     ChatCompletionParams,
-    "jsonSchema" | "onResponseMetadata"
+    "jsonSchema" | "onResponseMetadata" | "signal"
   > & { timeoutMs?: number } = {}
 ) {
   const { timeoutMs = 240_000, ...completionOptions } = options;
@@ -263,6 +350,7 @@ async function generatePlanningBatch(input: {
   foundation: DetailPlanFoundation;
   indexes: readonly number[];
   deadlineAt: number;
+  signal?: AbortSignal;
 }) {
   const prompt = buildPlanningScreenBatchPrompt({
     research: input.research,
@@ -272,12 +360,13 @@ async function generatePlanningBatch(input: {
   });
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (input.signal?.aborted) break;
     try {
       const text = await complete(
         input.providerConfig,
         textMessages(prompt),
         7_000,
-        { timeoutMs: planningTimeoutMs(input.deadlineAt) }
+        { timeoutMs: planningTimeoutMs(input.deadlineAt), signal: input.signal }
       );
       return {
         screens: parsePlanningBatch(text, input.indexes),
@@ -357,8 +446,15 @@ function mergeFindings(
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as SkillSuiteRequest;
-    const providerConfig = resolveProviderConfig(body.providerConfig);
+    const rawBody: unknown = await request.json().catch(() => {
+      throw new ServiceError("请求体必须是合法 JSON。", {
+        statusCode: 400,
+        code: "SKILL_SUITE_REQUEST_INVALID"
+      });
+    });
+    assertRequestShape(rawBody);
+    const body = rawBody;
+    const providerConfig = await resolveProviderConfig(body.providerConfig);
 
     if (body.stage === "research") {
       if (
@@ -394,15 +490,26 @@ export async function POST(request: Request) {
             image_url: { url: asset.dataUrl, detail: "high" }
           }) as OpenAI.Chat.Completions.ChatCompletionContentPartImage
       );
+      // 语义类问题（JSON 已完整、仅字段语义冲突）在修复轮次改为纯文本任务，
+      // 避免模型重新看图后再次生成自然复合句，抵消“只修结构”的要求。
+      const SEMANTIC_ISSUE_CODES = new Set([
+        "COMPOSITE_ENUM",
+        "CROSS_FIELD_CONFLICT",
+        "INVALID_ENUM",
+        "DUPLICATE_VALUE",
+        "OUT_OF_RANGE"
+      ]);
       let currentPrompt = buildResearchPrompt(assetIds, notes);
       let parsed: unknown;
       let repairCount = 0;
       let responseMetadata: unknown;
+      let includeImages = true;
+      let lastIssueFingerprint: string | null = null;
 
       while (repairCount <= 2) {
         const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
           { type: "text", text: currentPrompt },
-          ...imageParts
+          ...(includeImages ? imageParts : [])
         ];
         const text = await complete(
           providerConfig,
@@ -428,6 +535,8 @@ export async function POST(request: Request) {
         );
 
         let rejectedResult: unknown = text;
+        let jsonParsed = false;
+        let structuredIssues: Array<{ path: string; code: string }> = [];
         let issues: string[] = [];
         try {
           const extracted = extractJsonObject<unknown>(text);
@@ -443,9 +552,15 @@ export async function POST(request: Request) {
                 }
               : normalized;
           rejectedResult = parsed;
-          issues = collectResearchStructureIssues(parsed, {
+          jsonParsed = true;
+          const collected = collectResearchStructureIssues(parsed, {
             allowedAssetIds: assetIds
-          }).map(
+          });
+          structuredIssues = collected.map((issue) => ({
+            path: issue.path,
+            code: issue.code
+          }));
+          issues = collected.map(
             (issue, index) =>
               `${index + 1}. [${issue.code}] ${issue.path}：${issue.message}`
           );
@@ -454,6 +569,7 @@ export async function POST(request: Request) {
             error instanceof SkillSuiteValidationError &&
             error.code === "MODEL_JSON_INVALID"
           ) {
+            structuredIssues = [{ path: "$", code: "MODEL_JSON_INVALID" }];
             issues = ["1. [MODEL_JSON_INVALID] $：返回内容不是完整 JSON 对象。"];
           } else {
             throw error;
@@ -461,6 +577,22 @@ export async function POST(request: Request) {
         }
 
         if (issues.length === 0) break;
+
+        // 连续两轮修复停留在同一组问题上，说明修复不收敛，
+        // 立即失败并展示字段级命中详情，避免继续重复计费。
+        const issueFingerprint = structuredIssues
+          .map((issue) => `${issue.path}|${issue.code}`)
+          .sort()
+          .join(";");
+        if (repairCount > 0 && issueFingerprint === lastIssueFingerprint) {
+          throw new SkillSuiteValidationError(
+            "真实模型图研修复连续两轮停留在同一组结构问题上，已提前终止，未写入兜底数据。",
+            "RESEARCH_REPAIR_NOT_CONVERGING",
+            issues
+          );
+        }
+        lastIssueFingerprint = issueFingerprint;
+
         if (repairCount === 2) {
           throw new SkillSuiteValidationError(
             "真实模型图研结果经两次定点修复后仍不符合生产结构，未写入兜底数据。",
@@ -469,12 +601,18 @@ export async function POST(request: Request) {
           );
         }
 
+        const textOnlyRepair =
+          jsonParsed &&
+          structuredIssues.every((issue) => SEMANTIC_ISSUE_CODES.has(issue.code));
+
         repairCount += 1;
+        includeImages = !textOnlyRepair;
         currentPrompt = buildResearchRepairPrompt({
           rejectedResult,
           issues,
           assetIds,
-          notes
+          notes,
+          textOnly: textOnlyRepair
         });
       }
 
@@ -552,6 +690,8 @@ export async function POST(request: Request) {
         [10, 11, 12],
         [13, 14, 15]
       ] as const;
+      // 任一批次彻底失败时取消其余在途批次，避免白耗模型配额。
+      const batchAbort = new AbortController();
       const batchResults = await Promise.all(
         indexBatches.map((indexes) =>
           generatePlanningBatch({
@@ -560,7 +700,11 @@ export async function POST(request: Request) {
             brief: body.brief,
             foundation,
             indexes,
-            deadlineAt: planningDeadlineAt
+            deadlineAt: planningDeadlineAt,
+            signal: batchAbort.signal
+          }).catch((error) => {
+            batchAbort.abort();
+            throw error;
           })
         )
       );

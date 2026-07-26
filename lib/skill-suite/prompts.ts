@@ -109,20 +109,43 @@ export function buildResearchPrompt(assetIds: readonly string[], notes: string) 
   ].join("\n\n");
 }
 
+const RESEARCH_SPLIT_OPERATION_CONTRACT = [
+  "原子事实拆分操作契约（逐条执行，不得变通）：",
+  "1. 删除被点名的复合事实原记录；",
+  "2. 按命中的每个声明范围各新建一条事实，新 id 必须唯一（可顺延编号）；",
+  "3. 新事实复用原记录的 sourceAssetIds、sourceType、ocrConfidence、status、commercialUse；",
+  "4. 每条新事实的 label、value、evidence 三个字段都只保留本范围语义，删除其它范围的词；",
+  "5. 禁止只修改 claimScope 而保留复合文案；",
+  "6. 禁止把完整 OCR 原句复制到拆出的每条 evidence——应分别截取对应范围的片段；",
+  "7. 若拆分后超过12条上限，可删除同范围、低信息量、语义重复的事实，用拆出的高价值原子事实替换，最终保持6–12条。"
+].join("\n");
+
+const RESEARCH_SPLIT_EXAMPLES = [
+  "拆分示例（只学习拆法，禁止照抄内容到无关产品）：",
+  "“透明桶身，可见双驱水篮结构” → “透明桶身”(appearance) + “双驱水篮结构”(mechanism)；",
+  "“双驱旋转，清洗更省力” → “双驱旋转”(mechanism) + “清洗脱水更省力”(performance)；",
+  "“加厚纤维布，超强吸水” → “加厚纤维布”(material) + “超强吸水”(performance)。"
+].join("\n");
+
 export function buildResearchRepairPrompt(input: {
   rejectedResult: unknown;
   issues: readonly string[];
   assetIds: readonly string[];
   notes: string;
+  textOnly?: boolean;
 }) {
   return [
     "你刚才返回的图片研究 JSON 未通过生产结构校验。请只修复结构和原子事实拆分，不得改变图片事实原意，不得新增图片中没有的信息。",
-    "复合枚举不能取第一个糊弄过去：如果一条事实同时含多个 sourceType、claimScope 或 entityType，必须按原句语义拆成多条原子事实，并分别给出单一枚举。",
+    input.textOnly
+      ? "本轮是纯文本结构修复：JSON 已能解析，问题只在字段语义。本条消息不携带图片，禁止重新概括画面或引入被拒结果之外的新内容，只做下方问题清单点名的结构转换。"
+      : "复合枚举不能取第一个糊弄过去：如果一条事实同时含多个 sourceType、claimScope 或 entityType，必须按原句语义拆成多条原子事实，并分别给出单一枚举。",
+    RESEARCH_SPLIT_OPERATION_CONTRACT,
+    RESEARCH_SPLIT_EXAMPLES,
     "visualAudit 必须输出正好8项数组；不要输出以维度名为键的对象。",
     "source 必须是字符串 model；generatedAt 返回合法 ISO 时间。facts 必须保持6–12条，ID唯一，并且 sourceAssetIds 只能引用本次素材。",
     `本次素材ID：${input.assetIds.join("、")}`,
     input.notes ? `用户补充：${input.notes}` : "用户未补充额外事实。",
-    `路径级校验问题：\n${input.issues.join("\n")}`,
+    `路径级校验问题（含字段与命中词，按点名逐条处理）：\n${input.issues.join("\n")}`,
     `被拒结果：${JSON.stringify(input.rejectedResult)}`,
     "返回完整 ProductResearch JSON，不能只返回修复片段。",
     JSON_ONLY

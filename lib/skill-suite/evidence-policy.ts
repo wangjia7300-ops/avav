@@ -54,13 +54,10 @@ function collectStructureBlockedFactIndexes(
   const blocked = new Set<number>();
 
   issues.forEach((issue) => {
-    if (
-      !/model_inference|OCR 置信度|低置信度 image_text|数值\/OCR冲突|互不一致的数值范围/iu.test(
-        issue.message
-      )
-    ) {
-      return;
-    }
+    // 结构化匹配：只认 code + path，不再依赖中文报错文案措辞。
+    // CROSS_FIELD_CONFLICT 落在 facts[i].status / facts[i].commercialUse 上的，
+    // 正是 model_inference、低置信度 OCR、数值区间冲突三类必须回退 blocked 的情形。
+    if (issue.code !== "CROSS_FIELD_CONFLICT") return;
     const match = /^facts\[(\d+)\]\.(?:status|commercialUse)$/u.exec(
       issue.path
     );

@@ -2,6 +2,7 @@ import type OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { PRESET_PROVIDERS } from "@/lib/ai-providers";
 import { getEnvProviderConfig } from "@/lib/ai-providers";
+import { assertTrustedChatProviderConfig } from "@/lib/services/endpoint-guard";
 import { createAIChatCompletion } from "@/lib/services/openai-client";
 import { ServiceError } from "@/lib/services/errors";
 import type { AIProviderConfig } from "@/lib/types";
@@ -60,7 +61,12 @@ function resolveConfig(config: AIProviderConfig) {
     ...config,
     apiKey: config.apiKey.trim(),
     model: config.model.trim(),
-    baseURL: preset?.baseURL ?? config.baseURL.trim()
+    // custom 预设的 baseURL 是空字符串，必须使用用户填写的 Endpoint；
+    // 否则 SDK 会回落到 api.openai.com，把密钥发给非预期供应商。
+    baseURL:
+      config.providerId === "custom"
+        ? config.baseURL.trim()
+        : preset?.baseURL || config.baseURL.trim()
   };
 }
 
@@ -71,10 +77,10 @@ function parseTestResult(text: string) {
     .replace(/\s*```$/i, "");
   const start = stripped.indexOf("{");
   const end = stripped.lastIndexOf("}");
-  let payload: Record<string, unknown>;
+  let parsed: unknown;
 
   try {
-    payload = JSON.parse(start >= 0 && end > start ? stripped.slice(start, end + 1) : stripped);
+    parsed = JSON.parse(start >= 0 && end > start ? stripped.slice(start, end + 1) : stripped);
   } catch {
     throw new ServiceError("模型已连接，但未通过四技能 JSON 协议测试。", {
       statusCode: 422,
@@ -82,11 +88,20 @@ function parseTestResult(text: string) {
     });
   }
 
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ServiceError("模型已连接，但未通过四技能 JSON 协议测试。", {
+      statusCode: 422,
+      code: "MODEL_RESPONSE_JSON_INVALID"
+    });
+  }
+
+  const payload = parsed as Record<string, unknown>;
+
   if (
     typeof payload.category !== "string" ||
     typeof payload.dominantColor !== "string" ||
     typeof payload.visibleFact !== "string" ||
-    !/蓝|blue/i.test(payload.dominantColor)
+    !/蓝|青|靛|blue|navy|azure|cyan|indigo|cobalt|teal/i.test(payload.dominantColor)
   ) {
     throw new ServiceError("模型未通过图片理解与事实提取测试。", {
       statusCode: 422,
@@ -176,6 +191,10 @@ export async function POST(request: Request) {
         statusCode: 400,
         code: "MODEL_TEST_CONFIG_MISSING"
       });
+    }
+    if (body.providerConfig) {
+      // 客户端提交的配置必须指向公开 HTTPS 端点（防 SSRF）。
+      await assertTrustedChatProviderConfig(config);
     }
     const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
       {

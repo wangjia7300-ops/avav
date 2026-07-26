@@ -128,15 +128,26 @@ function extractNumericRanges(text: string): NumericRange[] {
   return ranges;
 }
 
-function factSemanticText(fact: UnknownRecord) {
-  return [fact.label, fact.value, fact.evidence]
-    .filter(isNonEmptyString)
-    .join("；");
+const SCOPE_CONFLICT_FIELDS = ["label", "value", "evidence"] as const;
+
+type ScopeConflictHit = {
+  field: (typeof SCOPE_CONFLICT_FIELDS)[number];
+  rule: ScopeSignalRule;
+  matches: string[];
+};
+
+function globalPattern(pattern: RegExp) {
+  return new RegExp(
+    pattern.source,
+    pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`
+  );
 }
 
-function collectScopeConflict(
-  fact: UnknownRecord
-): ScopeSignalRule[] | null {
+/**
+ * 字段级跨范围命中：不只说“混入了机制”，还要指出是 label/value/evidence
+ * 哪个字段、命中了哪些词、属于哪个范围——修复模型才能真正“定点”。
+ */
+function collectScopeConflictHits(fact: UnknownRecord): ScopeConflictHit[] | null {
   if (
     !isNonEmptyString(fact.claimScope) ||
     !CLAIM_SCOPES.includes(fact.claimScope as AtomicClaimScope)
@@ -144,11 +155,25 @@ function collectScopeConflict(
     return null;
   }
 
-  const text = factSemanticText(fact);
-  const scopes = CLAIM_SCOPE_SIGNAL_RULES.filter(
-    (rule) => rule.scope !== fact.claimScope && rule.pattern.test(text)
-  );
-  return scopes.length ? scopes : null;
+  const hits: ScopeConflictHit[] = [];
+  for (const field of SCOPE_CONFLICT_FIELDS) {
+    const text = fact[field];
+    if (!isNonEmptyString(text)) continue;
+    for (const rule of CLAIM_SCOPE_SIGNAL_RULES) {
+      if (rule.scope === fact.claimScope) continue;
+      const matches = Array.from(
+        new Set(
+          [...text.matchAll(globalPattern(rule.pattern))]
+            .map((match) => match[0].trim())
+            .filter(Boolean)
+        )
+      );
+      if (matches.length) {
+        hits.push({ field, rule, matches });
+      }
+    }
+  }
+  return hits.length ? hits : null;
 }
 
 function collectNumericRangeConflict(fact: UnknownRecord) {
@@ -408,18 +433,23 @@ function collectFactIssues(
       FACT_STATUSES
     );
 
-    const scopeConflicts = collectScopeConflict(fact);
-    if (scopeConflicts) {
-      const conflictLabels = scopeConflicts
-        .map((rule) => `${rule.label}(${rule.scope})`)
-        .join("、");
+    const scopeConflictHits = collectScopeConflictHits(fact);
+    if (scopeConflictHits) {
+      const hitDetails = scopeConflictHits
+        .map(
+          (hit) =>
+            `${basePath}.${hit.field} 命中「${hit.matches.join("、")}」→ 属于 ${hit.rule.label}(${hit.rule.scope})`
+        )
+        .join("；");
       issues.push({
         path: `${basePath}.claimScope`,
         code: "CROSS_FIELD_CONFLICT",
         message:
-          `${basePath} 声明为 ${describeValue(fact.claimScope)}，但 label/value/evidence 还包含` +
-          `${conflictLabels}语义。请拆成多条原子事实：每条只保留一个 claimScope，` +
-          "不得把材质、性能或工作机制合并后复用同一证据。"
+          `${basePath} 声明为 ${describeValue(fact.claimScope)}，但存在跨范围语义：${hitDetails}。` +
+          "请拆成多条原子事实：删除本条复合记录，每个范围新建一条事实，" +
+          "label/value/evidence 每个字段都只保留本范围语义；" +
+          "不得只修改 claimScope，不得把材质、性能或工作机制合并后复用同一证据，" +
+          "也不得把完整原句复制到拆出的每条 evidence。"
       });
     }
 

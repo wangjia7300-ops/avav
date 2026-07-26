@@ -1,9 +1,7 @@
 export type AIProviderId =
   | "openai"
   | "volcengine"
-  | "deepseek"
   | "anthropic"
-  | "moonshot"
   | "zhipu"
   | "custom";
 

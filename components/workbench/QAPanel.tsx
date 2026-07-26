@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle,
   DownloadSimple,
@@ -60,6 +60,11 @@ export function QAPanel({
   onRun
 }: QAPanelProps) {
   const [view, setView] = useState<QAView>("page");
+  const [publishConfirmed, setPublishConfirmed] = useState(false);
+
+  useEffect(() => {
+    setPublishConfirmed(false);
+  }, [qa]);
   const selected =
     plan?.screens.find((screen) => screen.id === selectedScreenId) ?? plan?.screens[0];
   const execution = selected ? executions[selected.id] : null;
@@ -237,9 +242,21 @@ export function QAPanel({
             <DownloadSimple size={17} />
             导出质检报告
           </button>
-          <button type="button" className="publish-action" disabled={groups.error.length > 0}>
-            <LockKey size={17} />
-            {groups.error.length ? "处理高风险声明后发布" : "质检通过 · 可发布"}
+          <button
+            type="button"
+            className="publish-action"
+            disabled={groups.error.length > 0}
+            onClick={() => {
+              exportReport(qa);
+              setPublishConfirmed(true);
+            }}
+          >
+            {publishConfirmed ? <CheckCircle size={17} weight="fill" /> : <LockKey size={17} />}
+            {groups.error.length
+              ? "处理高风险声明后发布"
+              : publishConfirmed
+                ? "已确认发布 · 报告已导出"
+                : "确认可发布并导出报告"}
           </button>
         </div>
       </aside>
@@ -269,24 +286,40 @@ function FindingGroup({
 }) {
   const Icon =
     severity === "error" ? WarningCircle : severity === "warning" ? Warning : CheckCircle;
+  const [expanded, setExpanded] = useState(false);
+  const collapsedLimit = severity === "pass" ? 5 : 8;
+  const visibleFindings = expanded ? findings : findings.slice(0, collapsedLimit);
   return (
     <section className={`finding-group ${severity}`}>
       <h3><Icon size={17} weight="fill" />{title}</h3>
       {findings.length ? (
-        findings.slice(0, severity === "pass" ? 5 : 8).map((finding) => (
-          <article key={finding.id}>
-            <div>
-              <strong>{finding.title}</strong>
-              <p>{finding.evidence}</p>
-              <p className="finding-fix">建议：{finding.fix}</p>
-            </div>
-            {finding.screenId ? (
-              <button type="button" onClick={() => onLocate(finding.screenId as string)}>
-                {finding.screenId.replace("screen-", "")} 屏
-              </button>
-            ) : null}
-          </article>
-        ))
+        <>
+          {visibleFindings.map((finding) => (
+            <article key={finding.id}>
+              <div>
+                <strong>{finding.title}</strong>
+                <p>{finding.evidence}</p>
+                <p className="finding-fix">建议：{finding.fix}</p>
+              </div>
+              {finding.screenId ? (
+                <button type="button" onClick={() => onLocate(finding.screenId as string)}>
+                  {finding.screenId.replace("screen-", "")} 屏
+                </button>
+              ) : null}
+            </article>
+          ))}
+          {findings.length > collapsedLimit ? (
+            <button
+              type="button"
+              className="finding-more"
+              onClick={() => setExpanded((value) => !value)}
+            >
+              {expanded
+                ? "收起"
+                : `展开全部 ${findings.length} 条（还有 ${findings.length - collapsedLimit} 条未显示）`}
+            </button>
+          ) : null}
+        </>
       ) : (
         <p className="finding-empty">暂无</p>
       )}

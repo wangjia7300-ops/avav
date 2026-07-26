@@ -381,6 +381,16 @@ textarea:focus-visible {
   box-shadow: 0 0 0 1px var(--blue);
 }
 
+.asset-select {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
 .asset-tile img {
   display: block;
   width: 100%;
@@ -388,14 +398,39 @@ textarea:focus-visible {
   object-fit: cover;
 }
 
+.asset-tile-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 5px 6px 6px 8px;
+}
+
 .asset-tile small {
   display: block;
   overflow: hidden;
-  padding: 7px 8px;
+  min-width: 0;
+  flex: 1;
   color: var(--ink-soft);
   font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.asset-kind {
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink-soft);
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.asset-kind:hover {
+  border-color: var(--ink-soft);
+  color: var(--ink);
 }
 
 .asset-check {
@@ -1257,7 +1292,7 @@ textarea:focus-visible {
 
 .mode-tabs {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   border: 1px solid var(--line-strong);
 }
 
@@ -1673,6 +1708,39 @@ textarea:focus-visible {
   font-size: 10px;
 }
 
+/* 配置弹窗主按钮（Tailwind 体系内的补充语义类） */
+.ai-gradient-button {
+  background-image: linear-gradient(135deg, #e36a25, #d8493f);
+  color: #fff;
+  border: 0;
+}
+
+.ai-gradient-button:hover {
+  opacity: 0.92;
+}
+
+/* 预览文案副标题（语义类，样式与 .preview-copy p 一致，供后续单独调整） */
+.preview-subheadline {
+  margin: 0;
+}
+
+.finding-more {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 0;
+  border: 1px dashed var(--line-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.finding-more:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}
+
 .qa-actions {
   display: grid;
   margin-top: 22px;
@@ -1940,7 +2008,7 @@ textarea:focus-visible {
 
   .mode-tabs {
     overflow-x: auto;
-    grid-template-columns: repeat(5, 112px);
+    grid-template-columns: repeat(4, 112px);
   }
 
   .execution-footer {

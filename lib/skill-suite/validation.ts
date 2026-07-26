@@ -1466,7 +1466,7 @@ export function runDeterministicQA(
   }
   const invalidRatio = plan.screens.filter(
     (screen) =>
-      !/(?:9\s*:\s*16)/.test(screen.composition) ||
+      !/(?:9\s*:\s*16|9\s*：\s*16)/u.test(screen.composition) ||
       (executions[screen.id] &&
         !/(?:9\s*:\s*16|1440x2560|vertical)/i.test(executions[screen.id].englishPrompt))
   );

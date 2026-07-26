@@ -1,10 +1,13 @@
-import { lookup } from "node:dns/promises";
 import {
   MAX_TOTAL_UPLOAD_IMAGE_BYTES,
   MAX_UPLOAD_IMAGE_BYTES,
   MAX_UPLOAD_IMAGE_COUNT
 } from "@/lib/config";
 import { IMAGE_PROVIDER_PRESETS } from "@/lib/image-providers";
+import {
+  assertPublicEndpoint,
+  isPrivateEndpointHostname
+} from "@/lib/services/endpoint-guard";
 import { ServiceError } from "@/lib/services/errors";
 import type {
   GeneratedImageAsset,
@@ -67,99 +70,13 @@ type ProviderImageRequest =
       contentType: "multipart";
     };
 
-function mappedIPv4Address(hostname: string) {
-  if (!hostname.startsWith("::ffff:")) return null;
-
-  const mapped = hostname.slice("::ffff:".length);
-  const dotted = mapped.split(":").at(-1);
-  if (dotted?.includes(".")) return dotted;
-
-  const groups = mapped.split(":").filter(Boolean);
-  const high = Number.parseInt(groups.at(-2) ?? "", 16);
-  const low = Number.parseInt(groups.at(-1) ?? "", 16);
-  if (
-    !Number.isInteger(high) ||
-    !Number.isInteger(low) ||
-    high < 0 ||
-    high > 0xffff ||
-    low < 0 ||
-    low > 0xffff
-  ) {
-    return null;
-  }
-
-  return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
-}
-
-function isNonPublicIPv4(hostname: string) {
-  const ipv4 = hostname.split(".").map(Number);
-  if (ipv4.length !== 4 || ipv4.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-    return false;
-  }
-
-  return (
-    ipv4[0] === 0 ||
-    ipv4[0] === 10 ||
-    ipv4[0] === 127 ||
-    (ipv4[0] === 100 && ipv4[1] >= 64 && ipv4[1] <= 127) ||
-    (ipv4[0] === 169 && ipv4[1] === 254) ||
-    (ipv4[0] === 172 && ipv4[1] >= 16 && ipv4[1] <= 31) ||
-    (ipv4[0] === 192 && ipv4[1] === 0 && ipv4[2] === 0) ||
-    (ipv4[0] === 192 && ipv4[1] === 0 && ipv4[2] === 2) ||
-    (ipv4[0] === 192 && ipv4[1] === 168) ||
-    (ipv4[0] === 198 && (ipv4[1] === 18 || ipv4[1] === 19)) ||
-    (ipv4[0] === 198 && ipv4[1] === 51 && ipv4[2] === 100) ||
-    (ipv4[0] === 203 && ipv4[1] === 0 && ipv4[2] === 113) ||
-    ipv4[0] >= 224
-  );
-}
-
-function isPrivateEndpointHostname(hostname: string) {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  const isIpv6 = normalized.includes(":");
-  const mappedIPv4 = mappedIPv4Address(normalized);
-
-  if (
-    normalized === "localhost" ||
-    normalized.endsWith(".localhost") ||
-    normalized.endsWith(".local") ||
-    (mappedIPv4 !== null && isNonPublicIPv4(mappedIPv4)) ||
-    (isIpv6 &&
-      (normalized === "::" ||
-        normalized === "::1" ||
-        normalized.startsWith("fc") ||
-        normalized.startsWith("fd") ||
-        /^fe[89ab]/.test(normalized) ||
-        normalized.startsWith("ff") ||
-        normalized.startsWith("100:") ||
-        normalized.startsWith("2001:db8:")))
-  ) {
-    return true;
-  }
-
-  return isNonPublicIPv4(normalized);
-}
-
 async function assertPublicCustomEndpoint(baseURL: string) {
-  const endpoint = new URL(baseURL);
-  const hostname = endpoint.hostname.replace(/^\[|\]$/g, "");
-  let addresses: Array<{ address: string }>;
-
-  try {
-    addresses = await lookup(hostname, { all: true, verbatim: true });
-  } catch {
-    throw new ServiceError("无法解析自定义生图 Endpoint，请检查地址后重试。", {
-      statusCode: 400,
-      code: "IMAGE_ENDPOINT_UNREACHABLE"
-    });
-  }
-
-  if (!addresses.length || addresses.some(({ address }) => isPrivateEndpointHostname(address))) {
-    throw new ServiceError("自定义生图 Endpoint 必须解析到公开网络地址。", {
-      statusCode: 400,
-      code: "IMAGE_ENDPOINT_INVALID"
-    });
-  }
+  await assertPublicEndpoint(baseURL, {
+    invalidMessage: "自定义生图 Endpoint 必须解析到公开网络地址。",
+    invalidCode: "IMAGE_ENDPOINT_INVALID",
+    unreachableMessage: "无法解析自定义生图 Endpoint，请检查地址后重试。",
+    unreachableCode: "IMAGE_ENDPOINT_UNREACHABLE"
+  });
 }
 
 function normalizeBaseURL(value: string) {

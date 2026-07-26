@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Info, WarningCircle, X } from "@phosphor-icons/react";
 import { AppHeader } from "@/components/AppHeader";
 import { AssetLibrary } from "@/components/workbench/AssetLibrary";
@@ -221,12 +221,17 @@ export function toWorkError(reason: unknown): WorkErrorInfo {
   };
 }
 
-export async function postJson<T>(url: string, body: unknown) {
+export async function postJson<T>(
+  url: string,
+  body: unknown,
+  init?: { signal?: AbortSignal }
+) {
   const response = await fetch(url, {
     method: "POST",
     cache: "no-store",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: init?.signal
   });
   const payload = (await response.json().catch(() => null)) as ApiResult<T> | null;
   if (!response.ok || !payload?.success) {
@@ -300,12 +305,50 @@ export function DetailPageWorkbench() {
     store.setWork("error", "", toWorkError(reason));
   }
 
-  function beginWork(label: string) {
+  // ── 竞态防护 ──────────────────────────────────────────────
+  // 每次运行持有一个句柄：AbortController 用于取消在途请求；
+  // epoch 用于识别“项目输入已变化”，过期响应的结果与错误一并丢弃。
+  type RunHandle = {
+    epoch: number;
+    controller: AbortController;
+    signal: AbortSignal;
+  };
+
+  const workAbortRef = useRef<AbortController | null>(null);
+
+  function beginRun(label?: string): RunHandle {
+    workAbortRef.current?.abort();
+    const controller = new AbortController();
+    workAbortRef.current = controller;
     setLastResponseMeta(null);
-    store.setWork("running", label);
+    if (label !== undefined) {
+      store.setWork("running", label);
+    }
+    return {
+      epoch: useSkillSuiteStore.getState().runEpoch,
+      controller,
+      signal: controller.signal
+    };
+  }
+
+  function isStale(run: RunHandle) {
+    return useSkillSuiteStore.getState().runEpoch !== run.epoch;
+  }
+
+  function discardStaleRun(run: RunHandle) {
+    // 仅当没有新的运行接管状态栏时才复位，避免覆盖新运行的 running 状态。
+    if (workAbortRef.current === run.controller) {
+      store.setWork("idle");
+    }
+  }
+
+  function abortActiveRun() {
+    workAbortRef.current?.abort();
+    workAbortRef.current = null;
   }
 
   async function runResearch() {
+    let run: RunHandle | null = null;
     try {
       const providerConfig = getProviderConfig();
       const assets = project.assets.filter((asset) => selectedAssetIds.includes(asset.id));
@@ -313,109 +356,138 @@ export function DetailPageWorkbench() {
       if (assets.some((asset) => !asset.dataUrl.startsWith("data:image/"))) {
         throw new Error("示例项目不能冒充真实模型输入，请先上传自己的产品图。");
       }
-      beginWork("正在执行真实 Ark 八维图研");
-      const response = await postJson<ProductResearch>("/api/skill-suite", {
-        stage: "research",
-        providerConfig,
-        assets: assets.map((asset) => ({ id: asset.id, dataUrl: asset.dataUrl })),
-        notes: project.brief.notes
-      });
+      run = beginRun("正在执行真实 Ark 八维图研");
+      const response = await postJson<ProductResearch>(
+        "/api/skill-suite",
+        {
+          stage: "research",
+          providerConfig,
+          assets: assets.map((asset) => ({ id: asset.id, dataUrl: asset.dataUrl })),
+          notes: project.brief.notes
+        },
+        { signal: run.signal }
+      );
+      if (isStale(run)) return discardStaleRun(run);
       setLastResponseMeta(response.meta);
       store.setResearch(response.data);
     } catch (reason) {
+      if (run && isStale(run)) return discardStaleRun(run);
       fail(reason);
     }
   }
 
   async function runPlanning() {
+    let run: RunHandle | null = null;
     try {
       if (!project.research) throw new Error("请先完成图片研究。");
       const providerConfig = getProviderConfig();
-      setLastResponseMeta(null);
       setGeneratedImages({});
+      run = beginRun();
       store.beginPlanning();
-      const response = await postJson<DetailPlan>("/api/skill-suite", {
-        stage: "planning",
-        providerConfig,
-        research: project.research,
-        brief: project.brief
-      });
+      const response = await postJson<DetailPlan>(
+        "/api/skill-suite",
+        {
+          stage: "planning",
+          providerConfig,
+          research: project.research,
+          brief: project.brief
+        },
+        { signal: run.signal }
+      );
+      if (isStale(run)) return discardStaleRun(run);
       setLastResponseMeta(response.meta);
       store.setPlan(response.data);
     } catch (reason) {
+      if (run && isStale(run)) return discardStaleRun(run);
       fail(reason);
     }
   }
 
-  async function generateExecutions(screenIds: string[]) {
-    if (!project.research || !project.plan) {
-      throw new Error("请先完成图研和15屏策划。");
-    }
-    const providerConfig = getProviderConfig();
-    const executions: ScreenExecution[] = [];
-    for (let start = 0; start < screenIds.length; start += 5) {
-      const ids = screenIds.slice(start, start + 5);
-      const screens = project.plan.screens.filter((screen) => ids.includes(screen.id));
-      beginWork(
-        screenIds.length === 1
-          ? "正在生成本屏交付"
-          : `正在生成第${start + 1}–${Math.min(start + 5, screenIds.length)}屏`
-      );
-      const response = await postJson<{ executions: ScreenExecution[] }>("/api/skill-suite", {
-        stage: "execution",
-        providerConfig,
-        research: project.research,
-        plan: project.plan,
-        screens,
-        mode: executionMode
-      });
-      setLastResponseMeta(response.meta);
-      executions.push(...response.data.executions);
-      store.mergeExecutions(response.data.executions);
-    }
-    return executions;
-  }
-
-  async function runSelectedExecution() {
-    try {
-      await generateExecutions([selectedScreenId]);
-    } catch (reason) {
-      fail(reason);
-    }
-  }
-
-  async function runAllExecutions() {
-    try {
-      if (!project.plan) throw new Error("请先完成15屏策划。");
-      await generateExecutions(project.plan.screens.map((screen) => screen.id));
-      store.setWork("success", "15屏 A / B / D / E 四类交付已完成");
-    } catch (reason) {
-      fail(reason);
-    }
-  }
-
-  async function runQA() {
+  async function generateExecutions(screenIds: string[], onDone?: () => void) {
+    let run: RunHandle | null = null;
     try {
       if (!project.research || !project.plan) {
         throw new Error("请先完成图研和15屏策划。");
       }
       const providerConfig = getProviderConfig();
-      beginWork("正在执行规则与模型质检");
-      const response = await postJson<QAReport>("/api/skill-suite", {
-        stage: "qa",
-        providerConfig,
-        research: project.research,
-        plan: project.plan,
-        executions: project.executions
-      });
+      run = beginRun("正在生成执行交付");
+      for (let start = 0; start < screenIds.length; start += 5) {
+        const ids = screenIds.slice(start, start + 5);
+        const screens = project.plan.screens.filter((screen) => ids.includes(screen.id));
+        store.setWork(
+          "running",
+          screenIds.length === 1
+            ? "正在生成本屏交付"
+            : `正在生成第${start + 1}–${Math.min(start + 5, screenIds.length)}屏`
+        );
+        const response = await postJson<{ executions: ScreenExecution[] }>(
+          "/api/skill-suite",
+          {
+            stage: "execution",
+            providerConfig,
+            research: project.research,
+            plan: project.plan,
+            screens,
+            mode: executionMode
+          },
+          { signal: run.signal }
+        );
+        if (isStale(run)) return discardStaleRun(run);
+        setLastResponseMeta(response.meta);
+        store.mergeExecutions(response.data.executions);
+      }
+      onDone?.();
+    } catch (reason) {
+      if (run && isStale(run)) return discardStaleRun(run);
+      fail(reason);
+    }
+  }
+
+  async function runSelectedExecution() {
+    await generateExecutions([selectedScreenId]);
+  }
+
+  async function runAllExecutions() {
+    if (!project.plan) {
+      fail(new Error("请先完成15屏策划。"));
+      return;
+    }
+    await generateExecutions(
+      project.plan.screens.map((screen) => screen.id),
+      () => store.setWork("success", "15屏 A / B / D / E 四类交付已完成")
+    );
+  }
+
+  async function runQA() {
+    let run: RunHandle | null = null;
+    try {
+      if (!project.research || !project.plan) {
+        throw new Error("请先完成图研和15屏策划。");
+      }
+      const providerConfig = getProviderConfig();
+      run = beginRun("正在执行规则与模型质检");
+      const response = await postJson<QAReport>(
+        "/api/skill-suite",
+        {
+          stage: "qa",
+          providerConfig,
+          research: project.research,
+          plan: project.plan,
+          executions: project.executions
+        },
+        { signal: run.signal }
+      );
+      if (isStale(run)) return discardStaleRun(run);
       setLastResponseMeta(response.meta);
       store.setQA(response.data);
     } catch (reason) {
+      if (run && isStale(run)) return discardStaleRun(run);
       fail(reason);
     }
   }
 
   async function runImageGeneration() {
+    let run: RunHandle | null = null;
     try {
       if (!project.research || !project.plan) throw new Error("本屏策划不完整。");
       const screen = project.plan.screens.find((item) => item.id === selectedScreenId);
@@ -425,16 +497,21 @@ export function DetailPageWorkbench() {
       if (!imageProviderConfig) throw new Error("请先在右上角“生图模型”中完成独立配置。");
       if (!project.assets.length) throw new Error("生图前必须上传产品参考图。");
 
-      beginWork("正在携带产品参考图与定稿文案生成9:16完整画面");
+      run = beginRun("正在携带产品参考图与定稿文案生成9:16完整画面");
       const referenceImages = await Promise.all(project.assets.map(resolveAssetDataUrl));
-      const response = await postJson<GeneratedImageAsset>("/api/skill-suite/image", {
-        requestId: `img_${Date.now()}_${crypto.randomUUID().replace(/-/g, "")}`,
-        screen,
-        execution,
-        facts: project.research.facts,
-        referenceImages,
-        imageProviderConfig
-      });
+      const response = await postJson<GeneratedImageAsset>(
+        "/api/skill-suite/image",
+        {
+          requestId: `img_${Date.now()}_${crypto.randomUUID().replace(/-/g, "")}`,
+          screen,
+          execution,
+          facts: project.research.facts,
+          referenceImages,
+          imageProviderConfig
+        },
+        { signal: run.signal }
+      );
+      if (isStale(run)) return discardStaleRun(run);
       setLastResponseMeta(response.meta);
       setGeneratedImages((current) => ({
         ...current,
@@ -442,11 +519,21 @@ export function DetailPageWorkbench() {
       }));
       store.setWork("success", `${screen.id} 图文画面生成完成`);
     } catch (reason) {
+      if (run && isStale(run)) return discardStaleRun(run);
       fail(reason);
     }
   }
 
   function handleAssetsChange(assets: ProjectAsset[]) {
+    if (
+      (project.research || project.plan) &&
+      !window.confirm(
+        "更换或新增素材会清空已生成的图研、策划、执行与质检结果（保证结果与素材一致）。继续吗？"
+      )
+    ) {
+      return;
+    }
+    abortActiveRun();
     store.setAssets(assets);
     setSelectedAssetIds(assets.map((asset) => asset.id));
     setGeneratedImages({});
@@ -460,6 +547,7 @@ export function DetailPageWorkbench() {
     ) {
       return;
     }
+    abortActiveRun();
     store.resetProject();
     setSelectedAssetIds([]);
     setGeneratedImages({});
@@ -481,6 +569,7 @@ export function DetailPageWorkbench() {
           selectedIds={selectedAssetIds}
           onSelectionChange={setSelectedAssetIds}
           onAssetsChange={handleAssetsChange}
+          onAssetKindChange={store.setAssetKind}
         />
 
         <main className="workbench-content">

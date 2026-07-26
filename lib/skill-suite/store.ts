@@ -35,10 +35,18 @@ type SkillSuiteStore = {
   workStatus: WorkStatus;
   workLabel: string;
   error: WorkErrorInfo | null;
+  /**
+   * 输入代际号：换素材、改简报、新建项目时递增。
+   * 在途请求完成时若代际号已变化，其结果必须被丢弃，
+   * 防止旧产品的生成结果写入新项目（竞态防护）。
+   */
+  runEpoch: number;
   setStage: (stage: WorkflowStage) => void;
   setSelectedScreen: (screenId: string) => void;
   setExecutionMode: (mode: ExecutionMode) => void;
   setAssets: (assets: ProjectAsset[]) => void;
+  /** 只改素材分类标签（不参与模型输入），不级联清空下游结果。 */
+  setAssetKind: (assetId: string, kind: ProjectAsset["kind"]) => void;
   updateBrief: (patch: Partial<SupplementalBrief>) => void;
   setResearch: (research: ProductResearch) => void;
   beginPlanning: () => void;
@@ -65,6 +73,7 @@ export const useSkillSuiteStore = create<SkillSuiteStore>((set) => ({
   workStatus: "idle",
   workLabel: "",
   error: null,
+  runEpoch: 0,
 
   setStage: (stage) => set({ stage, error: null }),
   setSelectedScreen: (selectedScreenId) => set({ selectedScreenId }),
@@ -85,7 +94,19 @@ export const useSkillSuiteStore = create<SkillSuiteStore>((set) => ({
       stage: "research",
       selectedScreenId: "screen-01",
       workStatus: "idle",
-      error: null
+      error: null,
+      runEpoch: state.runEpoch + 1
+    })),
+
+  setAssetKind: (assetId, kind) =>
+    set((state) => ({
+      project: {
+        ...state.project,
+        assets: state.project.assets.map((asset) =>
+          asset.id === assetId ? { ...asset, kind } : asset
+        ),
+        updatedAt: now()
+      }
     })),
 
   updateBrief: (patch) =>
@@ -97,7 +118,8 @@ export const useSkillSuiteStore = create<SkillSuiteStore>((set) => ({
         executions: {},
         qa: null,
         updatedAt: now()
-      }
+      },
+      runEpoch: state.runEpoch + 1
     })),
 
   setResearch: (research) =>
@@ -181,13 +203,14 @@ export const useSkillSuiteStore = create<SkillSuiteStore>((set) => ({
     set({ workStatus, workLabel, error }),
 
   resetProject: () =>
-    set({
+    set((state) => ({
       project: createEmptyProject(),
       stage: "research",
       selectedScreenId: "screen-01",
       executionMode: "E",
       workStatus: "idle",
       workLabel: "",
-      error: null
-    })
+      error: null,
+      runEpoch: state.runEpoch + 1
+    }))
 }));
