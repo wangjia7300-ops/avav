@@ -1,185 +1,220 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Bot, CheckCircle2, Loader2, PlugZap, ServerCrash, Sparkles } from "lucide-react";
+import {
+  Bot,
+  CheckCircle2,
+  CircleAlert,
+  Clock3,
+  Loader2,
+  PlugZap,
+  Sparkles
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { getProviderCapabilities } from "@/lib/ai-providers";
-import { useProviderStore } from "@/lib/provider-store";
+import { cn } from "@/lib/utils";
+import type { AIProviderConfig } from "@/lib/types";
 
-type Capability = {
+export type ModelTestPhase = "idle" | "editing" | "testing" | "verified" | "failed";
+
+export type ModelCapability = {
   id: string;
   name: string;
   description: string;
 };
 
-type ModelStatus = {
-  mode: "mock" | "openai";
+export type ModelTestResult = {
+  mode: "real";
   ready: boolean;
-  hasOpenAIKey: boolean;
+  providerId?: string | null;
   model: string;
-  capabilities: Capability[];
+  capabilities: ModelCapability[];
   message: string;
 };
 
-type ApiResponse = { success: true; data: ModelStatus } | { success: false; error: string };
+const defaultCapabilities: ModelCapability[] = [
+  {
+    id: "product_vision",
+    name: "产品图片识别",
+    description: "识别品类、品牌文字、可见外观/结构/颜色和 OCR 候选声明。"
+  },
+  {
+    id: "design_plan",
+    name: "视觉策划生成",
+    description: "生成电商画面方案，并避免夸大不可确认参数。"
+  },
+  {
+    id: "image_prompts",
+    name: "AI 绘画提示词",
+    description: "输出 GPT 图像提示词和负面词。"
+  }
+];
 
-type LoadState = "idle" | "loading" | "success" | "error";
+type AIModelStatusProps = {
+  config: AIProviderConfig;
+  phase: ModelTestPhase;
+  result: ModelTestResult | null;
+  error: string | null;
+  hasSavedConfig: boolean;
+  isDraftSaved: boolean;
+  canTest: boolean;
+  onTest: () => void;
+};
 
-export function AIModelStatus() {
-  const [status, setStatus] = useState<ModelStatus | null>(null);
-  const [loadState, setLoadState] = useState<LoadState>("idle");
-  const [error, setError] = useState<string | null>(null);
-  const [mounted, setMounted] = useState(false);
-  const { config, isConfigured } = useProviderStore();
-  const hasBrowserProvider = mounted && isConfigured && Boolean(config?.apiKey && config.model);
-  const browserCapabilities = hasBrowserProvider ? getProviderCapabilities(config) : null;
-  const effectiveMode = hasBrowserProvider || status?.mode === "openai" ? "openai" : "mock";
-  const effectiveReady = hasBrowserProvider || Boolean(status?.ready);
-  const effectiveModel = hasBrowserProvider ? config?.model : status?.model;
-
-  async function testModelStatus() {
-    setLoadState("loading");
-    setError(null);
-
-    try {
-      const providerConfig = useProviderStore.getState().getActiveConfig();
-      const response = await fetch("/api/ai-model/test", {
-        method: providerConfig ? "POST" : "GET",
-        headers: providerConfig
-          ? {
-              "Content-Type": "application/json"
-            }
-          : undefined,
-        body: providerConfig ? JSON.stringify({ providerConfig }) : undefined
-      });
-      const payload = (await response.json()) as ApiResponse;
-
-      if (!response.ok || !payload.success) {
-        throw new Error("error" in payload ? payload.error : "模型配置测试失败。");
-      }
-
-      setStatus(payload.data);
-      setLoadState("success");
-    } catch (requestError) {
-      setLoadState("error");
-      setError(requestError instanceof Error ? requestError.message : "模型配置测试失败。");
-    }
+function getConnectionCopy(
+  phase: ModelTestPhase,
+  canTest: boolean,
+  isDraftSaved: boolean,
+  result: ModelTestResult | null,
+  error: string | null
+) {
+  if (phase === "testing") {
+    return "正在验证 API 连通性和图片理解能力，请保持弹窗打开。";
   }
 
-  useEffect(() => {
-    setMounted(true);
-    void testModelStatus();
-  }, []);
+  if (phase === "verified") {
+    return result?.message ?? "模型连接与图片理解测试通过，配置已安全保存。";
+  }
 
-  const isLoading = loadState === "loading";
-  const isReady = effectiveReady;
+  if (phase === "failed") {
+    return error ?? "模型连接测试未通过，请返回检查配置。";
+  }
+
+  if (!canTest) {
+    return "请先完整填写 API Key、模型，以及自定义供应商的 HTTPS Endpoint。";
+  }
+
+  if (isDraftSaved) {
+    return "当前配置已保存。修改字段后离开输入框会自动重新测试。";
+  }
+
+  return "配置填写完成；离开当前输入框后会自动测试，通过后才会保存。";
+}
+
+export function AIModelStatus({
+  config,
+  phase,
+  result,
+  error,
+  hasSavedConfig,
+  isDraftSaved,
+  canTest,
+  onTest
+}: AIModelStatusProps) {
+  const isTesting = phase === "testing";
+  const isVerified = phase === "verified";
+  const isFailed = phase === "failed";
+  const capabilities = result?.capabilities?.length ? result.capabilities : defaultCapabilities;
+  const connectionCopy = getConnectionCopy(phase, canTest, isDraftSaved, result, error);
 
   return (
-    <Card className="shadow-none">
-      <CardHeader className="pb-3">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex items-start gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-700">
+            <Bot className="h-4 w-4" />
+          </span>
           <div>
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <Bot className="h-4 w-4 text-primary" />
-              AI 模型能力
-            </CardTitle>
-            <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              MVP 首测模块：先用一张小图确认模型链路和图片理解能力，再上传产品图开始分析。
+            <h3 className="text-sm font-semibold text-slate-950">AI 模型能力与连接状态</h3>
+            <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">
+              测试会发送一张极小图片，确认当前策划模型具备连接和图片理解能力。
             </p>
           </div>
-          <Button type="button" variant="outline" size="sm" disabled={isLoading} onClick={testModelStatus}>
-            {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
-            测试模型配置
-          </Button>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid gap-3 sm:grid-cols-3">
-          <div className="rounded-md border bg-white p-3">
-            <p className="text-xs font-medium text-muted-foreground">当前模式</p>
-            <div className="mt-2 flex items-center gap-2">
-              <Badge variant={effectiveMode === "openai" ? "default" : "secondary"}>
-                {effectiveMode === "openai" ? "真实模型" : "Mock 演示"}
-              </Badge>
-            </div>
-          </div>
-          <div className="rounded-md border bg-white p-3">
-            <p className="text-xs font-medium text-muted-foreground">API 配置</p>
-            <div className="mt-2 flex items-center gap-2">
-              {hasBrowserProvider ? (
-                <Badge variant="success">页面已配置</Badge>
-              ) : status?.hasOpenAIKey ? (
-                <Badge variant="success">服务端已配置</Badge>
-              ) : (
-                <Badge variant="secondary">未配置</Badge>
-              )}
-            </div>
-          </div>
-          <div className="rounded-md border bg-white p-3">
-            <p className="text-xs font-medium text-muted-foreground">识别模型</p>
-            <p className="mt-2 truncate text-sm font-semibold text-slate-950">{effectiveModel ?? "-"}</p>
-          </div>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-3">
-          {(browserCapabilities
-            ? [
-                {
-                  id: "vision",
-                  name: browserCapabilities.supportsVision ? "支持图片识别" : "不支持图片识别",
-                  description: browserCapabilities.supportsVision
-                    ? "可以执行产品图识别。"
-                    : "开始分析会被拦截，请更换视觉模型。"
-                },
-                {
-                  id: "structured",
-                  name: browserCapabilities.supportsStructuredOutput ? "支持结构化输出" : "结构化输出需兜底",
-                  description: browserCapabilities.supportsStructuredOutput
-                    ? "适合输出固定 JSON。"
-                    : "会使用提示词约束与宽松解析，失败时给出可读错误。"
-                },
-                {
-                  id: "web",
-                  name: "真实搜索已关闭",
-                  description: "不会调用搜索 API 或模型联网插件；市场验证按 AI 推断与用户资料处理。"
-                }
-              ]
-            : status?.capabilities ?? []
-          ).map((capability) => (
-            <div key={capability.id} className="rounded-md border bg-slate-50/70 p-3">
-              <div className="flex items-center gap-2">
-                <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-primary">
-                  <Sparkles className="h-4 w-4" />
-                </span>
-                <p className="text-sm font-semibold text-slate-950">{capability.name}</p>
-              </div>
-              <p className="mt-2 text-xs leading-5 text-muted-foreground">{capability.description}</p>
-            </div>
-          ))}
-        </div>
-
-        <div
-          className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm ${
-            loadState === "error" || !isReady
-              ? "bg-red-50 text-red-700"
-              : "bg-emerald-50 text-emerald-700"
-          }`}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!canTest || isTesting}
+          onClick={onTest}
+          className="shrink-0"
         >
-          {loadState === "error" || !isReady ? (
-            <ServerCrash className="mt-0.5 h-4 w-4 shrink-0" />
-          ) : (
-            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
-          )}
-          <p className="leading-6">
-            {error ??
-              (hasBrowserProvider
-                ? `页面 API 已配置，开始分析时会优先使用 ${config?.providerId}/${config?.model}。`
-                : status?.message ?? "正在读取模型状态...")}
-          </p>
+          {isTesting ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
+          {isTesting ? "正在测试" : isVerified || isFailed ? "重新测试" : "立即测试"}
+        </Button>
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+        <div className="rounded-lg border bg-slate-50/70 p-3">
+          <p className="text-xs font-medium text-muted-foreground">当前模式</p>
+          <Badge variant="default" className="mt-2">
+            真实模型
+          </Badge>
         </div>
-      </CardContent>
-    </Card>
+        <div className="rounded-lg border bg-slate-50/70 p-3">
+          <p className="text-xs font-medium text-muted-foreground">API 配置</p>
+          <Badge variant={isDraftSaved ? "success" : hasSavedConfig ? "violet" : "secondary"} className="mt-2">
+            {isDraftSaved ? "已保存" : hasSavedConfig ? "修改待验证" : "待验证"}
+          </Badge>
+        </div>
+        <div className="rounded-lg border bg-slate-50/70 p-3">
+          <p className="text-xs font-medium text-muted-foreground">连接状态</p>
+          <div className="mt-2 flex items-center gap-1.5 text-xs font-semibold">
+            {isTesting ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                <span className="text-primary">测试中</span>
+              </>
+            ) : isVerified ? (
+              <>
+                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                <span className="text-emerald-700">已通过</span>
+              </>
+            ) : isFailed ? (
+              <>
+                <CircleAlert className="h-3.5 w-3.5 text-red-600" />
+                <span className="text-red-700">未通过</span>
+              </>
+            ) : (
+              <>
+                <Clock3 className="h-3.5 w-3.5 text-slate-400" />
+                <span className="text-slate-600">待测试</span>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+        {capabilities.map((capability) => (
+          <div key={capability.id} className="rounded-lg border border-slate-200 bg-white p-3">
+            <div className="flex items-center gap-2">
+              <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <Sparkles className="h-3.5 w-3.5" />
+              </span>
+              <p className="text-sm font-semibold text-slate-950">{capability.name}</p>
+            </div>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">{capability.description}</p>
+          </div>
+        ))}
+      </div>
+
+      <div
+        aria-live={isFailed ? "assertive" : "polite"}
+        className={cn(
+          "mt-3 flex items-start gap-2 rounded-lg px-3 py-2 text-sm",
+          isFailed
+            ? "bg-red-50 text-red-700"
+            : isVerified
+              ? "bg-emerald-50 text-emerald-700"
+              : isTesting
+                ? "bg-blue-50 text-blue-700"
+                : "bg-amber-50 text-amber-800"
+        )}
+      >
+        {isFailed ? (
+          <CircleAlert className="mt-1 h-4 w-4 shrink-0" />
+        ) : isVerified ? (
+          <CheckCircle2 className="mt-1 h-4 w-4 shrink-0" />
+        ) : isTesting ? (
+          <Loader2 className="mt-1 h-4 w-4 shrink-0 animate-spin" />
+        ) : (
+          <Clock3 className="mt-1 h-4 w-4 shrink-0" />
+        )}
+        <p className="min-w-0 break-words leading-6">
+          {connectionCopy}
+          {config.model ? ` 当前模型：${config.model}` : ""}
+        </p>
+      </div>
+    </section>
   );
 }

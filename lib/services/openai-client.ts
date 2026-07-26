@@ -31,7 +31,7 @@ export async function createAIChatCompletion(
     return result.text;
   }
 
-  // 2. Fallback to server env OPENAI_API_KEY
+  // 2. Fallback to server env (ARK_API_KEY first, then OPENAI_API_KEY)
   const envConfig = getEnvProviderConfig();
   if (envConfig) {
     const result = await createChatCompletion(envConfig, {
@@ -42,7 +42,7 @@ export async function createAIChatCompletion(
     return result.text;
   }
 
-  throw new ServiceError("未配置 AI 供应商，请在页面设置中配置 API Key 和模型，或在 .env.local 中设置 OPENAI_API_KEY。", {
+  throw new ServiceError("未配置 AI 供应商，请在页面设置中配置 API Key 和模型，或在 .env.local 中设置 ARK_API_KEY / OPENAI_API_KEY。", {
     statusCode: 401,
     code: "API_KEY_MISSING"
   });

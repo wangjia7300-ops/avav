@@ -1,10 +1,13 @@
 import OpenAI from "openai";
-import { ENABLE_REAL_SEARCH } from "@/lib/config";
 import { ServiceError } from "@/lib/services/errors";
-import type { AIProviderConfig, AIProviderId, ProviderCapabilities } from "@/lib/types";
+import type { AIProviderConfig, AIProviderId } from "@/lib/types";
 
-// AI 请求超时（毫秒）。默认 120s；慢模型（如 gpt-5.5）可用环境变量 AI_REQUEST_TIMEOUT_MS 调高。
-const AI_REQUEST_TIMEOUT_MS = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 120000;
+const DEFAULT_AI_REQUEST_TIMEOUT_MS = 180_000;
+const MIN_AI_REQUEST_TIMEOUT_MS = 10_000;
+const MAX_AI_REQUEST_TIMEOUT_MS = 300_000;
+const DEFAULT_AI_TRANSPORT_RETRIES = 2;
+const MAX_AI_TRANSPORT_RETRIES = 2;
+const AI_RETRY_BASE_DELAY_MS = 500;
 
 // ── Preset definitions ────────────────────────────────────────────
 
@@ -17,7 +20,6 @@ export type ProviderPreset = {
   description: string;
   visionSupport: "supported" | "depends" | "not_supported";
   visionNote: string;
-  capabilities: ProviderCapabilities;
 };
 
 const VOLCENGINE_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
@@ -32,13 +34,7 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
     requiresAuth: true,
     description: "GPT 系列模型，支持视觉识别和结构化输出。",
     visionSupport: "supported",
-    visionNote: "支持图片理解",
-    capabilities: {
-      supportsVision: true,
-      supportsStructuredOutput: true,
-      supportsWebSearch: false,
-      supportsLongContext: true
-    }
+    visionNote: "支持图片理解"
   },
   {
     id: "volcengine",
@@ -46,15 +42,9 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
     baseURL: VOLCENGINE_ARK_BASE_URL,
     models: [],
     requiresAuth: true,
-    description: "豆包/Seed 系列模型。请在模型字段粘贴火山方舟 ep-... 接入点 ID；当前版本不启用模型自带联网搜索。",
+    description: "豆包/Seed 系列模型。模型字段支持官方模型名称或火山方舟 ep-... 推理接入点 ID。",
     visionSupport: "depends",
-    visionNote: "取决于接入点是否开通视觉理解",
-    capabilities: {
-      supportsVision: true,
-      supportsStructuredOutput: true,
-      supportsWebSearch: false,
-      supportsLongContext: true
-    }
+    visionNote: "取决于接入点是否开通视觉理解"
   },
   {
     id: "deepseek",
@@ -64,13 +54,7 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
     requiresAuth: true,
     description: "国产高性价比文本模型，支持 OpenAI 兼容接口；当前预设模型不支持产品图片识别。",
     visionSupport: "not_supported",
-    visionNote: "当前预设不支持图片理解",
-    capabilities: {
-      supportsVision: false,
-      supportsStructuredOutput: true,
-      supportsWebSearch: false,
-      supportsLongContext: true
-    }
+    visionNote: "当前预设不支持图片理解"
   },
   {
     id: "anthropic",
@@ -80,13 +64,7 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
     requiresAuth: true,
     description: "Claude 系列模型，支持图片理解，长文本和结构化输出能力强。",
     visionSupport: "supported",
-    visionNote: "支持图片理解",
-    capabilities: {
-      supportsVision: true,
-      supportsStructuredOutput: true,
-      supportsWebSearch: false,
-      supportsLongContext: true
-    }
+    visionNote: "支持图片理解"
   },
   {
     id: "moonshot",
@@ -96,13 +74,7 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
     requiresAuth: true,
     description: "Kimi 文本模型，支持 OpenAI 兼容接口；当前预设模型不用于产品图片识别。",
     visionSupport: "not_supported",
-    visionNote: "当前预设不支持图片理解",
-    capabilities: {
-      supportsVision: false,
-      supportsStructuredOutput: true,
-      supportsWebSearch: false,
-      supportsLongContext: true
-    }
+    visionNote: "当前预设不支持图片理解"
   },
   {
     id: "zhipu",
@@ -112,13 +84,7 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
     requiresAuth: true,
     description: "GLM 系列模型，支持 OpenAI 兼容接口；请选择带 v 的视觉模型用于产品图片识别。",
     visionSupport: "depends",
-    visionNote: "请选择视觉模型，例如 glm-4v-plus",
-    capabilities: {
-      supportsVision: false,
-      supportsStructuredOutput: true,
-      supportsWebSearch: false,
-      supportsLongContext: true
-    }
+    visionNote: "请选择视觉模型，例如 glm-4v-plus"
   },
   {
     id: "custom",
@@ -128,94 +94,9 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
     requiresAuth: true,
     description: "输入任意兼容 OpenAI Chat Completions API 的端点地址。",
     visionSupport: "depends",
-    visionNote: "取决于自定义模型是否支持图片输入",
-    capabilities: {
-      supportsVision: true,
-      supportsStructuredOutput: false,
-      supportsWebSearch: false,
-      supportsLongContext: false
-    }
+    visionNote: "取决于自定义模型是否支持图片输入"
   }
 ];
-
-function getProviderPreset(providerId: AIProviderId) {
-  return PRESET_PROVIDERS.find((provider) => provider.id === providerId);
-}
-
-export function getProviderCapabilities(config?: AIProviderConfig | null): ProviderCapabilities {
-  const withoutSearch = (capabilities: ProviderCapabilities): ProviderCapabilities => ({
-    ...capabilities,
-    supportsWebSearch: ENABLE_REAL_SEARCH ? capabilities.supportsWebSearch : false
-  });
-
-  if (!config) {
-    return withoutSearch({
-      supportsVision: true,
-      supportsStructuredOutput: true,
-      supportsWebSearch: false,
-      supportsLongContext: true
-    });
-  }
-
-  if (config.capabilities) {
-    return withoutSearch(config.capabilities);
-  }
-
-  const preset = getProviderPreset(config.providerId);
-  const model = config.model.toLowerCase();
-  const base = preset?.capabilities ?? {
-    supportsVision: true,
-    supportsStructuredOutput: false,
-    supportsWebSearch: false,
-    supportsLongContext: false
-  };
-
-  if (config.providerId === "zhipu") {
-    return withoutSearch({
-      ...base,
-      supportsVision: /\bglm-?4v|vision|vl\b/i.test(model)
-    });
-  }
-
-  if (config.providerId === "custom") {
-    return withoutSearch({
-      ...base,
-      supportsVision: !/(text|chat|reasoner|deepseek|moonshot)/i.test(model),
-      supportsStructuredOutput: true,
-      supportsWebSearch:
-        ENABLE_REAL_SEARCH && (/search|联网|web/i.test(model) || /volces\.com/i.test(config.baseURL))
-    });
-  }
-
-  return withoutSearch(base);
-}
-
-export function assertProviderCapability(
-  config: AIProviderConfig | null | undefined,
-  capability: keyof ProviderCapabilities,
-  message: string
-) {
-  const capabilities = getProviderCapabilities(config);
-  if (!capabilities[capability]) {
-    throw new ServiceError(message, {
-      statusCode: 400,
-      code: "MODEL_CAPABILITY_UNSUPPORTED"
-    });
-  }
-}
-
-export function providerSupportsBuiltInSearch(config?: AIProviderConfig | null) {
-  if (!ENABLE_REAL_SEARCH) {
-    return false;
-  }
-
-  if (!config?.apiKey || !config.model) {
-    return false;
-  }
-
-  const capabilities = getProviderCapabilities(config);
-  return capabilities.supportsWebSearch && (config.providerId === "volcengine" || /volces\.com/i.test(config.baseURL));
-}
 
 // ── Unified chat completion params ────────────────────────────────
 
@@ -228,11 +109,25 @@ export type ChatCompletionParams = {
     strict?: boolean;
   };
   maxTokens?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  maxTransportRetries?: number;
   enableWebSearch?: boolean;
+  onResponseMetadata?: (metadata: ChatCompletionResponseMetadata) => void;
+};
+
+export type ChatCompletionResponseMetadata = {
+  api: "chat_completions" | "responses" | "anthropic";
+  status?: string;
+  finishReason?: string;
+  incompleteReason?: string;
+  structuredOutputMode: "none" | "native_json_schema" | "instruction_fallback";
+  nativeJsonSchemaUnsupported?: boolean;
 };
 
 type ChatCompletionResult = {
   text: string;
+  metadata?: ChatCompletionResponseMetadata;
 };
 
 function isArkEndpointId(value: string) {
@@ -279,7 +174,10 @@ function resolveCompatibleConfig(config: AIProviderConfig) {
       rawBaseURL || (config.providerId === "volcengine" ? VOLCENGINE_ARK_BASE_URL : "")
     ),
     model: rawModel,
-    useResponsesAPI: config.providerId === "volcengine" || /\/responses\/?$/i.test(rawBaseURL)
+    // 火山方舟 v3 的官方 OpenAI SDK 示例使用 Responses API。
+    // 模型名称与 ep-... 推理接入点都统一走同一适配器，避免图片消息协议混用。
+    useResponsesAPI:
+      config.providerId === "volcengine" || /\/responses\/?$/i.test(rawBaseURL)
   };
 }
 
@@ -304,54 +202,233 @@ function getProviderErrorMessage(error: unknown) {
   return status ? `HTTP ${status}，${rawMessage}` : rawMessage;
 }
 
-function normalizeServiceError(error: unknown, providerName: string) {
-  if (error instanceof ServiceError) {
-    return error;
-  }
-
-  const status = (error as { status?: number; response?: { status?: number } }).status ??
+function getProviderStatus(error: unknown) {
+  return (error as { status?: number; statusCode?: number; response?: { status?: number } }).status ??
+    (error as { statusCode?: number }).statusCode ??
     (error as { response?: { status?: number } }).response?.status;
+}
 
-  const baseMessage = getProviderErrorMessage(error);
-  let hint = "";
+function resolveRequestTimeoutMs(params: ChatCompletionParams) {
+  const configuredTimeout = Number(
+    params.timeoutMs ?? process.env.AI_REQUEST_TIMEOUT_MS ?? DEFAULT_AI_REQUEST_TIMEOUT_MS
+  );
 
-  if (status === 401 && providerName === "volcengine") {
-    hint =
-      " 请确认已从火山方舟 Ark 控制台获取正确的 API Key（非 ep- 接入点 ID），ep- 接入点 ID 应填在「模型」字段。";
-  } else if (status === 401 && providerName === "openai") {
-    hint = " 请检查 API Key 是否正确，或以 sk- 开头。";
-  } else if (status === 401) {
-    hint = " 请检查 API Key 格式是否正确。";
+  if (!Number.isFinite(configuredTimeout)) {
+    return DEFAULT_AI_REQUEST_TIMEOUT_MS;
   }
 
-  return new ServiceError(`${providerName} API 调用失败：${baseMessage}${hint}`, {
-    statusCode: status === 401 ? 401 : 502,
+  return Math.min(
+    MAX_AI_REQUEST_TIMEOUT_MS,
+    Math.max(MIN_AI_REQUEST_TIMEOUT_MS, Math.round(configuredTimeout))
+  );
+}
+
+function isProviderTimeout(error: unknown) {
+  const candidate = error as { name?: string; code?: string; message?: string };
+  const name = candidate.name?.toLowerCase() ?? "";
+  const code = candidate.code?.toLowerCase() ?? "";
+  const message = candidate.message?.toLowerCase() ?? "";
+
+  return (
+    name.includes("timeout") ||
+    name === "aborterror" ||
+    code.includes("timeout") ||
+    code === "etimedout" ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("aborted")
+  );
+}
+
+function resolveTransportRetries(params: ChatCompletionParams) {
+  const configuredRetries = Number(
+    params.maxTransportRetries ??
+      process.env.AI_MAX_TRANSPORT_RETRIES ??
+      DEFAULT_AI_TRANSPORT_RETRIES
+  );
+
+  if (!Number.isFinite(configuredRetries)) {
+    return DEFAULT_AI_TRANSPORT_RETRIES;
+  }
+
+  return Math.min(
+    MAX_AI_TRANSPORT_RETRIES,
+    Math.max(0, Math.floor(configuredRetries))
+  );
+}
+
+function isRetryableTransportError(error: unknown) {
+  if (isProviderTimeout(error)) return false;
+
+  const status = getProviderStatus(error);
+  if (status === 429 || (typeof status === "number" && status >= 500)) {
+    return !(error instanceof ServiceError) ||
+      error.code === "ANTHROPIC_REQUEST_FAILED";
+  }
+
+  if (error instanceof ServiceError) return false;
+
+  const candidate = error as { name?: string; code?: string; message?: string };
+  const name = candidate.name?.toLowerCase() ?? "";
+  const code = candidate.code?.toLowerCase() ?? "";
+  const message = candidate.message?.toLowerCase() ?? "";
+
+  return (
+    name.includes("connection") ||
+    ["econnreset", "econnrefused", "eai_again", "enotfound", "epipe"].includes(code) ||
+    message.includes("fetch failed") ||
+    message.includes("network error") ||
+    message.includes("socket hang up") ||
+    message.includes("connection reset")
+  );
+}
+
+function waitForTransportRetry(delayMs: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, delayMs);
+    const abort = () => {
+      clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", abort);
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+function getSafeProviderFailure(error: unknown, providerName: string) {
+  const status = getProviderStatus(error);
+  const rawMessage = getProviderErrorMessage(error).toLowerCase();
+
+  if (
+    rawMessage.includes("accountoverdue") ||
+    rawMessage.includes("overdue balance") ||
+    rawMessage.includes("账户欠费") ||
+    rawMessage.includes("余额逾期")
+  ) {
+    return new ServiceError(
+      `${providerName} 账户存在逾期余额，请先在供应商控制台完成结算后重试。`,
+      {
+        statusCode: 402,
+        code: "AI_PROVIDER_ACCOUNT_OVERDUE"
+      }
+    );
+  }
+
+  if (isProviderTimeout(error)) {
+    return new ServiceError(`${providerName} 响应超时，请稍后重试当前步骤。`, {
+      statusCode: 504,
+      code: "AI_PROVIDER_TIMEOUT"
+    });
+  }
+
+  if (status === 401) {
+    return new ServiceError(`${providerName} API 鉴权失败，请检查 API Key。`, {
+      statusCode: 401,
+      code: "AI_PROVIDER_AUTH_FAILED"
+    });
+  }
+
+  if (status === 403) {
+    return new ServiceError(`${providerName} API 拒绝访问，请检查模型或接入点权限。`, {
+      statusCode: 403,
+      code: "AI_PROVIDER_PERMISSION_DENIED"
+    });
+  }
+
+  if (status === 404) {
+    return new ServiceError(`${providerName} 未找到当前模型或接入点。`, {
+      statusCode: 404,
+      code: "AI_PROVIDER_NOT_FOUND"
+    });
+  }
+
+  if (status === 429) {
+    return new ServiceError(`${providerName} 当前限流或额度不足，请稍后重试。`, {
+      statusCode: 429,
+      code: "AI_PROVIDER_RATE_LIMITED"
+    });
+  }
+
+  if (
+    (rawMessage.includes("image") || rawMessage.includes("vision") || rawMessage.includes("图片")) &&
+    (rawMessage.includes("unsupported") || rawMessage.includes("not support") || rawMessage.includes("不支持"))
+  ) {
+    return new ServiceError(`${providerName} 当前模型或接入点不支持图片理解。`, {
+      statusCode: 422,
+      code: "AI_PROVIDER_VISION_UNSUPPORTED"
+    });
+  }
+
+  if (status === 400 || status === 422) {
+    return new ServiceError(`${providerName} 拒绝了当前请求参数，请检查模型能力与接口兼容性。`, {
+      statusCode: 422,
+      code: "AI_PROVIDER_BAD_REQUEST"
+    });
+  }
+
+  return new ServiceError(`${providerName} API 调用失败，请稍后重试。`, {
+    statusCode: 502,
     code: "AI_PROVIDER_REQUEST_FAILED"
   });
 }
 
+function normalizeServiceError(error: unknown, providerName: string) {
+  if (error instanceof ServiceError) {
+    if (error.code === "ANTHROPIC_REQUEST_FAILED") {
+      return getSafeProviderFailure(error, providerName);
+    }
+
+    return error;
+  }
+
+  return getSafeProviderFailure(error, providerName);
+}
+
 function shouldTryNativeJsonSchema(config: AIProviderConfig) {
-  return getProviderCapabilities(config).supportsStructuredOutput &&
-    ["openai", "deepseek", "moonshot", "zhipu", "custom"].includes(config.providerId);
+  return ["openai", "deepseek", "moonshot", "zhipu", "custom"].includes(config.providerId);
 }
 
 function supportsResponsesWebSearch(config: AIProviderConfig) {
-  if (!ENABLE_REAL_SEARCH) {
-    return false;
-  }
-
   return config.providerId === "volcengine" || /volces\.com/i.test(config.baseURL);
 }
 
 function isJsonSchemaUnsupportedError(error: unknown) {
   const message = getProviderErrorMessage(error).toLowerCase();
-
-  return (
+  const mentionsStructuredOutput =
     message.includes("response_format") ||
     message.includes("json_schema") ||
-    message.includes("unsupported") ||
-    message.includes("not support")
+    message.includes("json schema") ||
+    message.includes("text.format") ||
+    message.includes("structured output");
+
+  return (
+    mentionsStructuredOutput &&
+    (message.includes("unsupported") ||
+      message.includes("not support") ||
+      message.includes("不支持") ||
+      message.includes("unknown") ||
+      message.includes("unrecognized") ||
+      message.includes("invalid"))
   );
+}
+
+function notifyResponseMetadata(
+  params: ChatCompletionParams,
+  metadata: ChatCompletionResponseMetadata
+) {
+  try {
+    params.onResponseMetadata?.(metadata);
+  } catch {
+    // Metadata is diagnostic-only and must never make a successful provider request fail.
+  }
 }
 
 function withJsonSchemaInstruction(
@@ -364,7 +441,7 @@ function withJsonSchemaInstruction(
 
   const schemaInstruction = [
     "你必须只返回合法 JSON，不要 Markdown，不要解释文字，不要代码块。",
-    "JSON 必须尽量遵循下面的字段结构；无法确认的信息用空字符串、空数组或 risks/注意事项表达，不要写占位词，不要编造：",
+    "JSON 必须尽量遵循下面的字段结构；无法确认的信息用空字符串、空数组或 [待确认]，不要编造：",
     JSON.stringify(jsonSchema.schema)
   ].join("\n");
 
@@ -380,7 +457,11 @@ function withJsonSchemaInstruction(
 function extractResponsesText(response: unknown) {
   const payload = response as {
     output_text?: string;
-    output?: Array<{ content?: Array<{ text?: string; type?: string }> }>;
+    output?: Array<{
+      type?: string;
+      status?: string;
+      content?: Array<{ text?: string; type?: string; refusal?: string }>;
+    }>;
   };
 
   if (payload.output_text) {
@@ -390,11 +471,87 @@ function extractResponsesText(response: unknown) {
   return (
     payload.output
       ?.flatMap((item) => item.content ?? [])
+      .filter(
+        (content) =>
+          !content.type || content.type === "output_text" || content.type === "text"
+      )
       .map((content) => content.text)
       .filter((text): text is string => Boolean(text))
       .join("\n")
       .trim() ?? ""
   );
+}
+
+function getResponsesState(response: unknown) {
+  const payload = response as {
+    status?: string;
+    error?: unknown;
+    incomplete_details?: { reason?: string } | null;
+    output?: Array<{ type?: string; status?: string }>;
+  };
+  const incompleteMessage = payload.output?.find(
+    (item) => item.type === "message" && item.status === "incomplete"
+  );
+
+  return {
+    status: payload.status,
+    incompleteReason: payload.incomplete_details?.reason,
+    hasIncompleteMessage: Boolean(incompleteMessage),
+    hasResponseError: Boolean(payload.error)
+  };
+}
+
+function assertResponsesCompleted(response: unknown) {
+  const state = getResponsesState(response);
+
+  if (
+    state.status === "incomplete" ||
+    state.hasIncompleteMessage ||
+    state.incompleteReason
+  ) {
+    if (
+      state.incompleteReason === "length" ||
+      state.incompleteReason === "max_output_tokens" ||
+      (state.incompleteReason?.includes("max") && state.incompleteReason.includes("token"))
+    ) {
+      throw new ServiceError("AI 输出达到长度上限，响应已被截断。", {
+        statusCode: 502,
+        code: "AI_RESPONSE_TRUNCATED",
+        details: {
+          normalizedValue: state.incompleteReason ?? "message_incomplete"
+        }
+      });
+    }
+
+    throw new ServiceError("AI 未能完成本次响应，请重试。", {
+      statusCode: 502,
+      code: "AI_RESPONSE_INCOMPLETE",
+      details: {
+        normalizedValue:
+          state.incompleteReason ??
+          state.status ??
+          (state.hasIncompleteMessage ? "message_incomplete" : "unknown")
+      }
+    });
+  }
+
+  if (
+    state.hasResponseError ||
+    state.status === "failed" ||
+    state.status === "cancelled" ||
+    state.status === "in_progress" ||
+    state.status === "queued"
+  ) {
+    throw new ServiceError("AI 响应未正常完成，请重试。", {
+      statusCode: 502,
+      code: "AI_RESPONSE_INCOMPLETE",
+      details: {
+        normalizedValue: state.status ?? "response_error"
+      }
+    });
+  }
+
+  return state;
 }
 
 function convertChatMessagesToResponsesInput(messages: ChatCompletionParams["messages"]) {
@@ -488,56 +645,43 @@ function splitResponsesMessages(messages: ChatCompletionParams["messages"]) {
 
 // ── OpenAI-compatible adapter ─────────────────────────────────────
 
-function isValidJsonLike(text: string) {
-  try {
-    const clean = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-    const objectStart = clean.indexOf("{");
-    const objectEnd = clean.lastIndexOf("}");
-    const arrayStart = clean.indexOf("[");
-    const arrayEnd = clean.lastIndexOf("]");
-    const start = objectStart >= 0 ? objectStart : arrayStart;
-    const end = objectStart >= 0 ? objectEnd : arrayEnd;
-    if (start < 0 || end <= start) return false;
-    JSON.parse(clean.slice(start, end + 1));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function openAICompatibleChat(
   config: AIProviderConfig,
   params: ChatCompletionParams
 ): Promise<ChatCompletionResult> {
   const resolved = resolveCompatibleConfig(config);
   const useNativeJsonSchema = shouldTryNativeJsonSchema(config);
+  let nativeJsonSchemaUnsupported = false;
   const client = new OpenAI({
     apiKey: config.apiKey,
     baseURL: resolved.baseURL || undefined,
-    timeout: AI_REQUEST_TIMEOUT_MS,
+    timeout: resolveRequestTimeoutMs(params),
     maxRetries: 0
   });
 
   async function request(useNativeSchema: boolean) {
-    return client.chat.completions.create({
-      model: resolved.model || params.model,
-      messages: useNativeSchema
-        ? params.messages
-        : withJsonSchemaInstruction(params.messages, params.jsonSchema),
-      ...(params.jsonSchema && useNativeSchema
-        ? {
-            response_format: {
-              type: "json_schema",
-              json_schema: {
-                name: params.jsonSchema.name,
-                strict: params.jsonSchema.strict ?? true,
-                schema: params.jsonSchema.schema
+    return client.chat.completions.create(
+      {
+        model: resolved.model || params.model,
+        messages: useNativeSchema
+          ? params.messages
+          : withJsonSchemaInstruction(params.messages, params.jsonSchema),
+        ...(params.jsonSchema && useNativeSchema
+          ? {
+              response_format: {
+                type: "json_schema",
+                json_schema: {
+                  name: params.jsonSchema.name,
+                  strict: params.jsonSchema.strict ?? true,
+                  schema: params.jsonSchema.schema
+                }
               }
             }
-          }
-        : {}),
-      max_tokens: params.maxTokens ?? 2000
-    });
+          : {}),
+        max_tokens: params.maxTokens ?? 2000
+      },
+      params.signal ? { signal: params.signal } : undefined
+    );
   }
 
   let completion: Awaited<ReturnType<typeof request>>;
@@ -548,43 +692,54 @@ async function openAICompatibleChat(
       throw error;
     }
 
+    nativeJsonSchemaUnsupported = true;
+    notifyResponseMetadata(params, {
+      api: "chat_completions",
+      status: "retrying_without_native_json_schema",
+      structuredOutputMode: "instruction_fallback",
+      nativeJsonSchemaUnsupported: true
+    });
     completion = await request(false);
   }
 
-  let text = completion.choices?.[0]?.message?.content?.trim() ?? "";
+  const finishReason: string | undefined = completion.choices[0]?.finish_reason ?? undefined;
+  const metadata: ChatCompletionResponseMetadata = {
+    api: "chat_completions",
+    status: finishReason === "stop" ? "completed" : finishReason,
+    finishReason,
+    structuredOutputMode: params.jsonSchema
+      ? nativeJsonSchemaUnsupported
+        ? "instruction_fallback"
+        : "native_json_schema"
+      : "none",
+    ...(nativeJsonSchemaUnsupported ? { nativeJsonSchemaUnsupported: true } : {})
+  };
+  notifyResponseMetadata(params, metadata);
 
-  // Retry once if JSON schema was requested but response isn't valid JSON
-  if (params.jsonSchema && text && !isValidJsonLike(text)) {
-    const retryCompletion = await client.chat.completions.create({
-      model: resolved.model || params.model,
-      messages: [
-        ...params.messages,
-        { role: "assistant", content: text },
-        {
-          role: "user",
-          content:
-            "Your response above is not valid JSON. Return ONLY the JSON object, no markdown fences, no explanation, no surrounding text. Just the raw JSON."
-        }
-      ],
-      max_tokens: params.maxTokens ?? 2000
+  if (["length", "max_tokens", "max_output_tokens"].includes(finishReason ?? "")) {
+    throw new ServiceError("AI 输出达到长度上限，响应已被截断。", {
+      statusCode: 502,
+      code: "AI_RESPONSE_TRUNCATED"
     });
-    text = retryCompletion.choices?.[0]?.message?.content?.trim() ?? "";
   }
 
+  if (finishReason === "content_filter") {
+    throw new ServiceError("AI 响应未能完整生成。", {
+      statusCode: 502,
+      code: "AI_RESPONSE_INCOMPLETE"
+    });
+  }
+
+  const text = completion.choices[0]?.message?.content?.trim() ?? "";
+
   if (!text) {
-    const hasImage = params.messages.some(
-      (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url")
-    );
-    const hint = hasImage
-      ? " 当前请求包含图片，请确认该模型/接入点支持视觉理解（多模态）。"
-      : "";
-    throw new ServiceError(`AI 返回内容为空，请重试。${hint}`, {
+    throw new ServiceError("AI 返回内容为空，请重试。", {
       statusCode: 502,
       code: "AI_EMPTY_RESPONSE"
     });
   }
 
-  return { text };
+  return { text, metadata };
 }
 
 async function responsesCompatibleChat(
@@ -593,42 +748,50 @@ async function responsesCompatibleChat(
 ): Promise<ChatCompletionResult> {
   const resolved = resolveCompatibleConfig(config);
   const tryNativeJsonSchema = config.providerId === "openai" || config.providerId === "volcengine";
+  let nativeJsonSchemaUnsupported = false;
   const client = new OpenAI({
     apiKey: config.apiKey,
-    baseURL: resolved.baseURL
+    baseURL: resolved.baseURL,
+    timeout: resolveRequestTimeoutMs(params),
+    maxRetries: 0
   });
 
-  // Prepare messages once outside request() so retry can reuse
-  const preparedNative = params.messages;
-  const preparedFallback = withJsonSchemaInstruction(params.messages, params.jsonSchema);
-
   async function request(useNativeSchema: boolean) {
-    const preparedMessages = useNativeSchema ? preparedNative : preparedFallback;
+    const preparedMessages = useNativeSchema
+      ? params.messages
+      : withJsonSchemaInstruction(params.messages, params.jsonSchema);
     const { instructions, inputMessages } = splitResponsesMessages(preparedMessages);
 
-    return client.responses.create({
-      model: resolved.model || params.model,
-      ...(instructions ? { instructions } : {}),
-      input: convertChatMessagesToResponsesInput(inputMessages) as never,
-      ...(params.jsonSchema && useNativeSchema
-        ? {
-            text: {
-              format: {
-                type: "json_schema",
-                name: params.jsonSchema.name,
-                strict: params.jsonSchema.strict ?? true,
-                schema: params.jsonSchema.schema
+    return client.responses.create(
+      {
+        model: resolved.model || params.model,
+        ...(instructions ? { instructions } : {}),
+        input: convertChatMessagesToResponsesInput(inputMessages) as never,
+        ...(params.jsonSchema && useNativeSchema
+          ? {
+              text: {
+                format: {
+                  type: "json_schema",
+                  name: params.jsonSchema.name,
+                  strict: params.jsonSchema.strict ?? true,
+                  schema: params.jsonSchema.schema
+                }
               }
             }
-          }
-        : {}),
-      ...(params.enableWebSearch && supportsResponsesWebSearch(config)
-        ? {
-            tools: [{ type: "web_search" }]
-          }
-        : {}),
-      max_output_tokens: params.maxTokens ?? 2000
-    } as never);
+          : {}),
+        ...(params.enableWebSearch && supportsResponsesWebSearch(config)
+          ? {
+              tools: [
+                {
+                  type: "web_search"
+                }
+              ]
+            }
+          : {}),
+        max_output_tokens: params.maxTokens ?? 2000
+      } as never,
+      params.signal ? { signal: params.signal } : undefined
+    );
   }
 
   let response: Awaited<ReturnType<typeof request>>;
@@ -638,46 +801,42 @@ async function responsesCompatibleChat(
     if (!params.jsonSchema || !tryNativeJsonSchema || !isJsonSchemaUnsupportedError(error)) {
       throw error;
     }
+
+    nativeJsonSchemaUnsupported = true;
+    notifyResponseMetadata(params, {
+      api: "responses",
+      status: "retrying_without_native_json_schema",
+      structuredOutputMode: "instruction_fallback",
+      nativeJsonSchemaUnsupported: true
+    });
     response = await request(false);
   }
 
-  let text = extractResponsesText(response);
+  const state = getResponsesState(response);
+  const metadata: ChatCompletionResponseMetadata = {
+    api: "responses",
+    status: state.status,
+    incompleteReason: state.incompleteReason,
+    structuredOutputMode: params.jsonSchema
+      ? nativeJsonSchemaUnsupported
+        ? "instruction_fallback"
+        : "native_json_schema"
+      : "none",
+    ...(nativeJsonSchemaUnsupported ? { nativeJsonSchemaUnsupported: true } : {})
+  };
+  notifyResponseMetadata(params, metadata);
+  assertResponsesCompleted(response);
 
-  // Retry once if JSON schema was requested but response isn't valid JSON
-  if (params.jsonSchema && text && !isValidJsonLike(text)) {
-    const { instructions } = splitResponsesMessages(preparedNative);
-    const { inputMessages } = splitResponsesMessages(preparedNative);
-    const strictInstructions = instructions
-      ? `${instructions}\n\nCRITICAL: Previous response was not JSON. Return ONLY the raw JSON object. No markdown.`
-      : "Return ONLY valid JSON. No markdown, no explanation.";
-
-    const retryResponse = await client.responses.create({
-      model: resolved.model || params.model,
-      instructions: strictInstructions,
-      input: [
-        ...convertChatMessagesToResponsesInput(inputMessages),
-        { role: "assistant", content: text.slice(0, 800) },
-        { role: "user", content: "That was not valid JSON. Return ONLY the raw JSON object now." }
-      ] as never,
-      max_output_tokens: params.maxTokens ?? 2000
-    } as never);
-    text = extractResponsesText(retryResponse);
-  }
+  const text = extractResponsesText(response);
 
   if (!text) {
-    const hasImage = params.messages.some(
-      (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url")
-    );
-    const hint = hasImage
-      ? " 当前请求包含图片，请确认该模型/接入点支持视觉理解（多模态）。"
-      : "";
-    throw new ServiceError(`AI 返回内容为空，请重试。${hint}`, {
+    throw new ServiceError("AI 返回内容为空，请重试。", {
       statusCode: 502,
       code: "AI_EMPTY_RESPONSE"
     });
   }
 
-  return { text };
+  return { text, metadata };
 }
 
 // ── Anthropic adapter (raw fetch, no SDK dependency) ──────────────
@@ -757,36 +916,7 @@ function extractAnthropicText(data: unknown, toolName?: string) {
   );
 }
 
-function buildCompactJsonInstruction(jsonSchema: NonNullable<ChatCompletionParams["jsonSchema"]>) {
-  if (jsonSchema.name === "design_plan" || jsonSchema.name === "ecommerce_design_plan") {
-    return [
-      "Return ONLY valid JSON, no markdown.",
-      "The JSON must be an object with exactly these top-level fields:",
-      "- mainImages: an array of 5 objects. Each object must include index, title, goal, scene, layout, imageBrief, textImageLayout, visualFocus, visualGuidelines, copywriting, visualElements.",
-      "- detailPages: an array of 14 objects. Each object must include index, title, goal, layout, imageBrief, textImageLayout, visualFocus, visualGuidelines, copywriting, visualElements.",
-      "copywriting must be an object with headline, subheadline, and body strings. visualElements must be an array of strings.",
-      "visualGuidelines must include string fields: overallTone, imageTexture, lightingLogic, colorPaletteSystem, typographyRules, compositionRules, productAppearanceFeatures, unifiedVisualStyle."
-    ].join("\n");
-  }
-
-  if (jsonSchema.name === "image_prompts") {
-    return [
-      "Return ONLY valid JSON, no markdown.",
-      "The JSON must be an object with an items array.",
-      "Each item must include imageType, index, title, prompts, negativePrompt.",
-      "imageType must be main_image or detail_page.",
-      "prompts must be an object containing exactly one string field: gpt."
-    ].join("\n");
-  }
-
-  if (jsonSchema.name === "product_analysis") {
-    return [
-      "Return ONLY valid JSON, no markdown.",
-      "The JSON must include: category, productNameGuess, appearance, visibleFeatures, materials, colors, styleKeywords, risks, brandNames, brandVisualStyle, specifications, sellingPoints, dataSellingPoints, targetAudience, parameters, productDetails, specialRequirements, visualStyleSystem.",
-      "Array fields must be arrays of strings. brandNames must include chinese and english. visualStyleSystem must include overallTone, imageTexture, lightingLogic, colorSystem, typographyRules, compositionRules."
-    ].join("\n");
-  }
-
+function buildCompactJsonInstruction(_jsonSchema: NonNullable<ChatCompletionParams["jsonSchema"]>) {
   return [
     "Return ONLY valid JSON, no markdown.",
     "The JSON must follow the requested structure and include all required fields."
@@ -862,9 +992,19 @@ async function anthropicChat(
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
-
+  const abortFromParent = () => controller.abort();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    resolveRequestTimeoutMs(params)
+  );
   let response: Response;
+
+  if (params.signal?.aborted) {
+    controller.abort();
+  } else {
+    params.signal?.addEventListener("abort", abortFromParent, { once: true });
+  }
+
   try {
     response = await fetch(`${config.baseURL}/messages`, {
       method: "POST",
@@ -878,17 +1018,44 @@ async function anthropicChat(
     });
   } finally {
     clearTimeout(timeoutId);
+    params.signal?.removeEventListener("abort", abortFromParent);
   }
 
   if (!response.ok) {
-    const errorBody = await response.text().catch(() => "");
-    throw new ServiceError(`Anthropic API 调用失败 (${response.status})：${errorBody}`, {
-      statusCode: response.status === 401 ? 401 : 502,
+    throw new ServiceError("Anthropic API 调用失败。", {
+      statusCode: response.status >= 400 && response.status < 500 ? response.status : 502,
       code: "ANTHROPIC_REQUEST_FAILED"
     });
   }
 
-  const data = await response.json();
+  const data = (await response.json()) as { stop_reason?: string | null };
+  const finishReason = data.stop_reason ?? undefined;
+  const metadata: ChatCompletionResponseMetadata = {
+    api: "anthropic",
+    status: finishReason === "max_tokens" || finishReason === "refusal" ? "incomplete" : "completed",
+    finishReason,
+    structuredOutputMode: params.jsonSchema
+      ? useAnthropicToolSchema
+        ? "native_json_schema"
+        : "instruction_fallback"
+      : "none"
+  };
+  notifyResponseMetadata(params, metadata);
+
+  if (finishReason === "max_tokens") {
+    throw new ServiceError("AI 输出达到长度上限，响应已被截断。", {
+      statusCode: 502,
+      code: "AI_RESPONSE_TRUNCATED"
+    });
+  }
+
+  if (finishReason === "refusal") {
+    throw new ServiceError("AI 未能完成本次响应。", {
+      statusCode: 502,
+      code: "AI_RESPONSE_INCOMPLETE"
+    });
+  }
+
   const text = extractAnthropicText(data, useAnthropicToolSchema ? params.jsonSchema?.name : undefined);
 
   if (!text) {
@@ -898,7 +1065,7 @@ async function anthropicChat(
     });
   }
 
-  return { text };
+  return { text, metadata };
 }
 
 // ── Main entry ────────────────────────────────────────────────────
@@ -907,24 +1074,69 @@ export async function createChatCompletion(
   config: AIProviderConfig,
   params: ChatCompletionParams
 ): Promise<ChatCompletionResult> {
-  try {
-    if (config.providerId === "anthropic") {
-      return await anthropicChat(config, params);
+  const maxRetries = resolveTransportRetries(params);
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    if (params.signal?.aborted) {
+      throw new ServiceError("AI 请求已取消。", {
+        statusCode: 499,
+        code: "AI_REQUEST_ABORTED"
+      });
     }
 
-    if (resolveCompatibleConfig(config).useResponsesAPI) {
-      return await responsesCompatibleChat(config, params);
-    }
+    try {
+      if (config.providerId === "anthropic") {
+        return await anthropicChat(config, params);
+      }
 
-    return await openAICompatibleChat(config, params);
-  } catch (error) {
-    throw normalizeServiceError(error, config.providerId);
+      if (resolveCompatibleConfig(config).useResponsesAPI) {
+        return await responsesCompatibleChat(config, params);
+      }
+
+      return await openAICompatibleChat(config, params);
+    } catch (error) {
+      lastError = error;
+      if (
+        attempt >= maxRetries ||
+        !isRetryableTransportError(error)
+      ) {
+        break;
+      }
+
+      await waitForTransportRetry(
+        AI_RETRY_BASE_DELAY_MS * 2 ** attempt,
+        params.signal
+      );
+    }
   }
+
+  if (params.signal?.aborted) {
+    throw new ServiceError("AI 请求已取消。", {
+      statusCode: 499,
+      code: "AI_REQUEST_ABORTED"
+    });
+  }
+
+  throw normalizeServiceError(lastError, config.providerId);
 }
 
 // ── Build provider config from env fallback ───────────────────────
 
 export function getEnvProviderConfig(): AIProviderConfig | null {
+  const arkApiKey = process.env.ARK_API_KEY?.trim();
+  if (arkApiKey) {
+    return {
+      providerId: "volcengine",
+      apiKey: arkApiKey,
+      baseURL:
+        process.env.ARK_BASE_URL?.trim() || VOLCENGINE_ARK_BASE_URL,
+      model:
+        process.env.ARK_MODEL?.trim() || "doubao-seed-1-8-251228",
+      displayName: "火山方舟 Ark（服务端）"
+    };
+  }
+
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
 
@@ -932,6 +1144,7 @@ export function getEnvProviderConfig(): AIProviderConfig | null {
     providerId: "openai",
     apiKey,
     baseURL: "https://api.openai.com/v1",
-    model: "gpt-4.1-mini"
+    model: process.env.OPENAI_MODEL?.trim() || "gpt-4.1-mini",
+    displayName: "OpenAI（服务端）"
   };
 }

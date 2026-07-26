@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   CheckCircle2,
   ChevronDown,
@@ -8,57 +8,108 @@ import {
   EyeOff,
   FlaskConical,
   Globe,
+  Image as ImageIcon,
   Key,
+  Loader2,
   Rocket,
-  ShieldAlert,
-  Image
+  ShieldAlert
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PRESET_PROVIDERS } from "@/lib/ai-providers";
-import { useProviderStore } from "@/lib/provider-store";
-import type { AIProviderId } from "@/lib/types";
+import type { ModelTestPhase } from "@/components/workspace/AIModelStatus";
+import type { AIProviderConfig, AIProviderId } from "@/lib/types";
 
-export function AIProviderConfig() {
-  const { config, isConfigured, selectPreset, setApiKey, setBaseURL, setModel, resetConfig } =
-    useProviderStore();
+export function createProviderDraft(providerId: AIProviderId): AIProviderConfig {
+  const preset = PRESET_PROVIDERS.find((provider) => provider.id === providerId);
 
+  return {
+    providerId,
+    apiKey: "",
+    baseURL: preset?.baseURL ?? "",
+    model: preset?.models[0] ?? ""
+  };
+}
+
+export function normalizeProviderConfig(config: AIProviderConfig): AIProviderConfig {
+  return {
+    providerId: config.providerId,
+    apiKey: config.apiKey.trim(),
+    baseURL: config.baseURL.trim(),
+    model: config.model.trim(),
+    displayName: config.displayName
+  };
+}
+
+export function isProviderConfigComplete(config: AIProviderConfig) {
+  const normalized = normalizeProviderConfig(config);
+  const hasRequiredFields = Boolean(normalized.apiKey && normalized.model);
+
+  if (!hasRequiredFields) return false;
+  if (normalized.providerId !== "custom") return true;
+
+  return /^https:\/\//i.test(normalized.baseURL);
+}
+
+export function providerConfigSignature(config: AIProviderConfig) {
+  const normalized = normalizeProviderConfig(config);
+
+  return [
+    normalized.providerId,
+    normalized.baseURL,
+    normalized.model,
+    normalized.apiKey
+  ].join("\u0000");
+}
+
+type AIProviderConfigProps = {
+  config: AIProviderConfig;
+  phase: ModelTestPhase;
+  hasSavedConfig: boolean;
+  isDraftSaved: boolean;
+  onChange: (config: AIProviderConfig) => void;
+  onAutoTest: (config: AIProviderConfig) => void;
+  onReset: () => void;
+};
+
+export function AIProviderConfig({
+  config,
+  phase,
+  hasSavedConfig,
+  isDraftSaved,
+  onChange,
+  onAutoTest,
+  onReset
+}: AIProviderConfigProps) {
   const [showKey, setShowKey] = useState(false);
-  const [mounted, setMounted] = useState(false);
-
-  // API 配置只保存在当前页面内存中，顺手清理旧版本留下的本地存储。
-  useEffect(() => {
-    window.localStorage.removeItem("ai-provider-config");
-    window.localStorage.removeItem("search-provider-config");
-    setMounted(true);
-  }, []);
-
-  if (!mounted) {
-    return (
-      <Card className="shadow-none">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-sm">
-            <Rocket className="h-4 w-4 text-primary" />
-            AI 供应商配置
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-xs text-muted-foreground">加载中...</p>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  const selectedProviderId = config?.providerId ?? "openai";
-  const selectedPreset = PRESET_PROVIDERS.find((p) => p.id === selectedProviderId);
+  const selectedProviderId = config.providerId;
+  const selectedPreset = PRESET_PROVIDERS.find((provider) => provider.id === selectedProviderId);
   const isCustom = selectedProviderId === "custom";
+  const isTesting = phase === "testing";
   const selectedVisionVariant =
     selectedPreset?.visionSupport === "supported"
       ? "success"
       : selectedPreset?.visionSupport === "not_supported"
         ? "secondary"
         : "violet";
+
+  const status = isTesting
+    ? { label: "自动测试中", variant: "violet" as const, icon: Loader2 }
+    : phase === "verified" && isDraftSaved
+      ? { label: "已验证", variant: "success" as const, icon: CheckCircle2 }
+      : phase === "failed"
+        ? { label: "测试失败", variant: "secondary" as const, icon: ShieldAlert }
+        : hasSavedConfig && !isDraftSaved
+          ? { label: "修改待验证", variant: "violet" as const, icon: FlaskConical }
+          : hasSavedConfig
+            ? { label: "已保存 · 待验证", variant: "default" as const, icon: FlaskConical }
+            : { label: "待配置", variant: "secondary" as const, icon: FlaskConical };
+  const StatusIcon = status.icon;
+
+  function updateConfig(patch: Partial<AIProviderConfig>) {
+    onChange({ ...config, ...patch });
+  }
 
   return (
     <Card className="shadow-none">
@@ -70,31 +121,30 @@ export function AIProviderConfig() {
               AI 供应商配置
             </CardTitle>
             <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              选择 AI 模型供应商并配置 API Key。配置仅在当前页面会话内存中使用，刷新页面后不会保留。
+              填完整配置后，离开输入框会自动测试；只有测试通过的配置才会保存到浏览器。
             </p>
           </div>
-          {isConfigured ? (
-            <Badge variant="success" className="h-fit gap-1">
-              <CheckCircle2 className="h-3 w-3" />
-              已配置
-            </Badge>
-          ) : (
-            <Badge variant="secondary" className="h-fit">
-              未配置
-            </Badge>
-          )}
+          <Badge variant={status.variant} className="h-fit gap-1">
+            <StatusIcon className={isTesting ? "h-3 w-3 animate-spin" : "h-3 w-3"} />
+            {status.label}
+          </Badge>
         </div>
       </CardHeader>
 
       <CardContent className="space-y-4">
-        {/* Provider selector */}
         <div className="space-y-2">
-          <label className="text-xs font-semibold text-slate-950">供应商</label>
+          <label htmlFor="ai-provider-select" className="text-xs font-semibold text-slate-950">
+            供应商
+          </label>
           <div className="relative">
             <select
+              id="ai-provider-select"
               value={selectedProviderId}
-              onChange={(e) => selectPreset(e.target.value as AIProviderId)}
-              className="w-full appearance-none rounded-md border border-slate-200 bg-white px-3 py-2 pr-8 text-sm text-slate-900 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              disabled={isTesting}
+              onChange={(event) =>
+                onChange(createProviderDraft(event.target.value as AIProviderId))
+              }
+              className="w-full appearance-none rounded-md border border-slate-200 bg-white px-3 py-2 pr-8 text-sm text-slate-900 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
             >
               {PRESET_PROVIDERS.map((provider) => (
                 <option key={provider.id} value={provider.id}>
@@ -104,28 +154,34 @@ export function AIProviderConfig() {
             </select>
             <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           </div>
-          {selectedPreset && (
+          {selectedPreset ? (
             <div className="space-y-2">
               <p className="text-xs leading-5 text-muted-foreground">{selectedPreset.description}</p>
               <Badge variant={selectedVisionVariant} className="gap-1">
-                <Image className="h-3 w-3" />
+                <ImageIcon className="h-3 w-3" />
                 {selectedPreset.visionNote}
               </Badge>
             </div>
-          )}
+          ) : null}
         </div>
 
-        {/* API Key */}
         <div className="space-y-2">
-          <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-950">
+          <label
+            htmlFor="ai-provider-key"
+            className="flex items-center gap-1.5 text-xs font-semibold text-slate-950"
+          >
             <Key className="h-3.5 w-3.5" />
             API Key
           </label>
           <div className="relative">
             <input
+              id="ai-provider-key"
               type={showKey ? "text" : "password"}
-              value={config?.apiKey ?? ""}
-              onChange={(e) => setApiKey(e.target.value)}
+              autoComplete="off"
+              value={config.apiKey}
+              disabled={isTesting}
+              onChange={(event) => updateConfig({ apiKey: event.target.value })}
+              onBlur={(event) => onAutoTest({ ...config, apiKey: event.currentTarget.value })}
               placeholder={
                 selectedProviderId === "openai"
                   ? "sk-..."
@@ -133,58 +189,76 @@ export function AIProviderConfig() {
                     ? "sk-ant-..."
                     : "输入 API Key"
               }
-              className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 pr-10 text-sm text-slate-900 placeholder:text-slate-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 pr-10 text-sm text-slate-900 placeholder:text-slate-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
             />
             <button
               type="button"
-              onClick={() => setShowKey(!showKey)}
+              onClick={() => setShowKey((visible) => !visible)}
+              aria-label={showKey ? "隐藏 API Key" : "显示 API Key"}
               className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-slate-700"
-              tabIndex={-1}
             >
               {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </button>
           </div>
         </div>
 
-        {/* Custom base URL */}
-        {isCustom && (
+        {isCustom ? (
           <div className="space-y-2">
-            <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-950">
+            <label
+              htmlFor="ai-provider-endpoint"
+              className="flex items-center gap-1.5 text-xs font-semibold text-slate-950"
+            >
               <Globe className="h-3.5 w-3.5" />
               API Endpoint
             </label>
             <input
+              id="ai-provider-endpoint"
               type="url"
-              value={config?.baseURL ?? ""}
-              onChange={(e) => setBaseURL(e.target.value)}
+              value={config.baseURL}
+              disabled={isTesting}
+              onChange={(event) => updateConfig({ baseURL: event.target.value })}
+              onBlur={(event) => onAutoTest({ ...config, baseURL: event.currentTarget.value })}
               placeholder="https://api.example.com/v1"
-              className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
             />
             <p className="text-xs leading-5 text-muted-foreground">
-              可输入 OpenAI 兼容 base URL，也支持完整 Responses endpoint，例如
-              https://ark.cn-beijing.volces.com/api/v3/responses。
-              火山方舟的 ep-... 是接入点 ID，不是 URL，请优先填到「模型」字段。
+              仅支持 HTTPS 的 OpenAI 兼容 Endpoint。火山方舟 ep-... 是接入点 ID，应填到“模型”字段。
             </p>
+            {config.baseURL && !/^https:\/\//i.test(config.baseURL.trim()) ? (
+              <p className="text-xs font-medium text-red-600">Endpoint 必须以 https:// 开头。</p>
+            ) : null}
           </div>
-        )}
+        ) : null}
 
-        {/* Model selector */}
         <div className="space-y-2">
-          <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-950">
+          <label
+            htmlFor="ai-provider-model"
+            className="flex items-center gap-1.5 text-xs font-semibold text-slate-950"
+          >
             <FlaskConical className="h-3.5 w-3.5" />
             模型
           </label>
           {selectedPreset && selectedPreset.models.length > 0 && !isCustom ? (
             <div className="relative">
               <select
-                value={config?.model ?? selectedPreset.models[0]}
-                onChange={(e) => setModel(e.target.value)}
-                className="w-full appearance-none rounded-md border border-slate-200 bg-white px-3 py-2 pr-8 text-sm text-slate-900 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                id="ai-provider-model"
+                value={config.model || selectedPreset.models[0]}
+                disabled={isTesting}
+                onChange={(event) => {
+                  const nextConfig = { ...config, model: event.target.value };
+                  onChange(nextConfig);
+                  onAutoTest(nextConfig);
+                }}
+                className="w-full appearance-none rounded-md border border-slate-200 bg-white px-3 py-2 pr-8 text-sm text-slate-900 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
               >
                 {selectedPreset.models.map((model) => (
                   <option key={model} value={model}>
                     {model}
-                    {model.includes("4v") ? "（支持图片）" : selectedPreset.visionSupport === "not_supported" ? "（文本）" : ""}
+                    {model.includes("4v")
+                      ? "（支持图片）"
+                      : selectedPreset.visionSupport === "not_supported"
+                        ? "（文本）"
+                        : ""}
                   </option>
                 ))}
               </select>
@@ -192,39 +266,33 @@ export function AIProviderConfig() {
             </div>
           ) : (
             <input
+              id="ai-provider-model"
               type="text"
-              value={config?.model ?? ""}
-              onChange={(e) => setModel(e.target.value)}
+              value={config.model}
+              disabled={isTesting}
+              onChange={(event) => updateConfig({ model: event.target.value })}
+              onBlur={(event) => onAutoTest({ ...config, model: event.currentTarget.value })}
               placeholder="输入模型名称或火山方舟 ep-... 接入点 ID"
-              className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
             />
           )}
         </div>
 
         {selectedPreset?.visionSupport === "not_supported" ? (
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
-            当前供应商预设主要用于文本任务，产品图片识别会失败。请换用 OpenAI、Anthropic、火山方舟视觉接入点或 GLM 视觉模型。
+            当前预设模型不支持产品图片识别，自动测试预计无法通过。请改用视觉模型。
           </div>
         ) : null}
 
-        {/* Security note */}
         <div className="flex items-start gap-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
           <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <p>
-            API Key 通过 HTTPS 发送到服务端，不写入 localStorage、不落盘存储；仅保存在当前页面内存中。
-            请勿在公共电脑上长时间停留已填写页面。
+            API Key 仅通过 HTTPS 发送到服务端进行测试；测试通过后保存在当前浏览器，不会写入项目文件或服务端数据库。
           </p>
         </div>
 
-        {/* Actions */}
         <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={resetConfig}
-            disabled={!config}
-          >
+          <Button type="button" variant="outline" size="sm" onClick={onReset} disabled={isTesting}>
             重置为服务端配置
           </Button>
         </div>

@@ -1,55 +1,114 @@
-import Link from "next/link";
-import { ArrowRight, Sparkles } from "lucide-react";
-import { buttonVariants } from "@/components/ui/button";
-import { brand, brandAssets } from "@/lib/brand-tokens";
+"use client";
+
+import { useState } from "react";
+import {
+  Check,
+  FileText,
+  ImageSquare,
+  MagnifyingGlass,
+  PaintBrush,
+  Plus,
+  ShieldCheck
+} from "@phosphor-icons/react";
+import { APISettingsDialog } from "@/components/workspace/APISettingsDialog";
+import { ImageAPISettingsDialog } from "@/components/workspace/ImageAPISettingsDialog";
 import { cn } from "@/lib/utils";
+import type { WorkflowStage } from "@/lib/types";
+
+const stages: Array<{
+  id: WorkflowStage;
+  label: string;
+  icon: typeof MagnifyingGlass;
+}> = [
+  { id: "research", label: "图研", icon: MagnifyingGlass },
+  { id: "planning", label: "策划", icon: FileText },
+  { id: "execution", label: "执行", icon: PaintBrush },
+  { id: "qa", label: "质检", icon: ShieldCheck }
+];
 
 type AppHeaderProps = {
-  showWorkspaceCta?: boolean;
+  stage: WorkflowStage;
+  completedStages: WorkflowStage[];
+  onStageChange: (stage: WorkflowStage) => void;
+  onNewProject: () => void;
 };
 
-export function AppHeader({ showWorkspaceCta = true }: AppHeaderProps) {
+export function AppHeader({
+  stage,
+  completedStages,
+  onStageChange,
+  onNewProject
+}: AppHeaderProps) {
+  const [apiOpen, setApiOpen] = useState(false);
+  const [imageApiOpen, setImageApiOpen] = useState(false);
+
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-white/95 backdrop-blur">
-      <div className="ai-container flex h-[72px] items-center justify-between">
-        <Link href="/" className="flex items-center gap-3 font-semibold text-slate-950">
-          <span className="ai-brand-mark">
-            <img src={brandAssets.logoMark} alt="" className="h-6 w-6" />
-          </span>
-          <span className="text-lg sm:text-xl">{brand.name}</span>
-        </Link>
-
-        {showWorkspaceCta ? (
-          <nav className="hidden items-center gap-12 text-sm font-medium text-slate-700 lg:flex">
-            <a href="#capabilities" className="transition-colors hover:text-primary">
-              产品能力
-            </a>
-            <Link href="/workspace" className="transition-colors hover:text-primary">
-              工作台
-            </Link>
-            <a href="#workflow" className="transition-colors hover:text-primary">
-              案例
-            </a>
-            <a href="#pricing" className="transition-colors hover:text-primary">
-              定价
-            </a>
-          </nav>
-        ) : null}
-
-        {showWorkspaceCta ? (
-          <Link
-            href="/workspace"
-            className={cn(
-              buttonVariants({ size: "sm" }),
-              "ai-gradient-button h-10 px-5 text-sm"
-            )}
+    <>
+      <header className="workbench-header">
+        <div className="workbench-brand">
+          <button
+            type="button"
+            className="brand-mark"
+            aria-label="新建详情页项目"
+            onClick={onNewProject}
           >
-            <Sparkles className="h-4 w-4" />
-            开始创建项目
-            <ArrowRight className="h-4 w-4" />
-          </Link>
-        ) : null}
-      </div>
-    </header>
+            <Plus size={18} weight="bold" />
+          </button>
+          <div>
+            <p className="brand-title">电商详情页工作台</p>
+            <p className="brand-subtitle">四技能生产系统</p>
+          </div>
+        </div>
+
+        <nav className="workflow-nav" aria-label="详情页生产流程">
+          {stages.map((item, index) => {
+            const Icon = item.icon;
+            const completed = completedStages.includes(item.id);
+            const active = stage === item.id;
+            return (
+              <div key={item.id} className="workflow-nav-item">
+                {index > 0 ? <span className="workflow-connector" aria-hidden="true" /> : null}
+                <button
+                  type="button"
+                  className={cn(
+                    "workflow-step",
+                    active && "is-active",
+                    completed && !active && "is-complete"
+                  )}
+                  onClick={() => onStageChange(item.id)}
+                  aria-current={active ? "step" : undefined}
+                >
+                  <span className="workflow-step-icon">
+                    {completed && !active ? <Check size={15} weight="bold" /> : <Icon size={16} />}
+                  </span>
+                  <span>
+                    <b>{item.label}</b>
+                    <small>{index + 1}/4</small>
+                  </span>
+                </button>
+              </div>
+            );
+          })}
+        </nav>
+
+        <div className="header-actions">
+          <button type="button" className="header-config-button" onClick={() => setApiOpen(true)}>
+            <FileText size={17} />
+            文案模型
+          </button>
+          <button
+            type="button"
+            className="header-config-button"
+            onClick={() => setImageApiOpen(true)}
+          >
+            <ImageSquare size={17} />
+            生图模型
+          </button>
+        </div>
+      </header>
+
+      <APISettingsDialog open={apiOpen} onClose={() => setApiOpen(false)} />
+      <ImageAPISettingsDialog open={imageApiOpen} onClose={() => setImageApiOpen(false)} />
+    </>
   );
 }

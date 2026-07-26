@@ -3,8 +3,8 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AI视觉落地服务",
-  description: "从商品图到完整视觉方案，自动生成电商主图、详情页与 AI 提示词。"
+  title: "电商详情页工作台",
+  description: "图研、策划、执行、质检四技能驱动的15屏电商详情页生产系统。"
 };
 
 export default function RootLayout({
@@ -13,7 +13,7 @@ export default function RootLayout({
   children: ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" suppressHydrationWarning>
       <body>{children}</body>
     </html>
   );
