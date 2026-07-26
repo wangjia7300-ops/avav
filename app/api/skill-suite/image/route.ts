@@ -1,6 +1,6 @@
-import { NextResponse } from "next/server";
 import { parseImageProviderConfig } from "@/lib/image-providers";
 import { compileScreenImagePrompt } from "@/lib/skill-suite/prompts";
+import { jsonNoStore } from "@/lib/skill-suite/server/http";
 import { generateImageFromPrompt } from "@/lib/services/generate-image-from-prompt";
 import { serializeApiError, ServiceError } from "@/lib/services/errors";
 import type {
@@ -16,13 +16,6 @@ export const maxDuration = 300;
 // 多实例 / Serverless 需改用带 TTL 的外部存储。
 const inFlight = new Map<string, Promise<GeneratedImageAsset>>();
 const completedRequestIds = new Set<string>();
-
-function jsonNoStore(body: unknown, status = 200) {
-  return NextResponse.json(body, {
-    status,
-    headers: { "Cache-Control": "no-store, max-age=0" }
-  });
-}
 
 export async function POST(request: Request) {
   try {

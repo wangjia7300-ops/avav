@@ -1,10 +1,10 @@
 import type OpenAI from "openai";
-import { NextResponse } from "next/server";
 import { PRESET_PROVIDERS } from "@/lib/ai-providers";
 import { getEnvProviderConfig } from "@/lib/ai-providers";
 import { assertTrustedChatProviderConfig } from "@/lib/services/endpoint-guard";
 import { createAIChatCompletion } from "@/lib/services/openai-client";
 import { ServiceError } from "@/lib/services/errors";
+import { jsonNoStore } from "@/lib/skill-suite/server/http";
 import type { AIProviderConfig } from "@/lib/types";
 
 export const maxDuration = 180;
@@ -29,13 +29,6 @@ const capabilities = [
 
 const tinyVisionTestImage =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAByUlEQVR42u2Zr08DMRTHbw0sQSwEUTTBoBGgCLIGewq1f2F+Qewf4F+YQs1iLlMLCgQaQ9BUECCBZBjESy6X9trturv+yL5PLe3l9v28vvfavut9/SyzlI1liRsAAAAAANS/dzxn43mqAKV0DwysO/V+GJADAAAAAAAAAAAAYJsBem5diWNxZ5p6Oz9URo4e300PvxbXvgEGe7ute/H79297Q2jHIXIOTq4szzzvPykjp59nluc/Xu43iSXWrnoHoxdaksp3CCn+trs/0jJaiu5afeMccF6HdWwx6SsjlzfLYACNbHoxtCDZMQID3HJe/hY5V2aLmVyJwWJQL3Kuq1fG9QCLJYRKieRvfVzkXJlyPEq0uw+Q+0kl6VOChFyu4OmBFH4FipmsjW8aLCb92ugKnANV9zeKND0TWJzur66DJQFwIwOAyLmpwJe1KMYkHkmpF/6V2RJpGRU5L+oOC8o+EN1GphdT005scX8sGxlpNTnbHmkhAUZS0iKQRNNp1H43CLwClM1VDNOZIuoLzfBhWnutSeZGtr5c7MRJA1DzjBppLZq/zlwXDBuqd2yvO7cBu+iwM/9/mYX9PoAqBAAAAAAAAIjJ/gExrMO8dzUj4QAAAABJRU5ErkJggg==";
-
-function jsonNoStore(body: unknown, status = 200) {
-  return NextResponse.json(body, {
-    status,
-    headers: { "Cache-Control": "no-store, max-age=0" }
-  });
-}
 
 function resolveConfig(config: AIProviderConfig) {
   if (!config.apiKey.trim() || !config.model.trim()) {

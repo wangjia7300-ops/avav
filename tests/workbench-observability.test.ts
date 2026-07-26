@@ -1,12 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  ApiError,
-  postJson,
-  sanitizeDiagnosticText,
-  toWorkError
-} from "@/components/workbench/DetailPageWorkbench";
 import { createEmptyProject } from "@/lib/skill-suite/defaults";
 import { useSkillSuiteStore } from "@/lib/skill-suite/store";
+import { ApiError, postJson, toWorkError } from "@/lib/workbench/api-client";
+import { sanitizeDiagnosticText } from "@/lib/workbench/diagnostics";
 import type {
   DetailPlan,
   ProductResearch,
