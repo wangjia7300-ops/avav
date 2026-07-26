@@ -43,7 +43,7 @@ const facts: EvidenceFact[] = [
     id: "fact-strap",
     label: "背负外观",
     value: "双肩带带有可见网眼织物",
-    evidence: "左下角背面展示图可见肩带网眼材质外观。",
+    evidence: "左下角背面展示图可见肩带网眼织物外观。",
     sourceAssetIds: ["synthetic-fixture"],
     sourceType: "visual_observation",
     claimScope: "appearance",
@@ -380,9 +380,9 @@ function buildExecution(screen: DetailScreen): ScreenExecution {
     screenId: screen.id,
     copyFinal: screen.copy,
     visualInstruction: `${screen.scene}。采用${screen.shot}，围绕“${screen.role}”建立单一画面任务。严格保持参考图中的原始产品配色与主体结构。为标题、副标题、正文和要点预留清晰层级与安全区，文字不得遮挡产品。`,
-    visualPrompt: `A vertical 9:16 premium e-commerce product visual featuring the exact cream, caramel orange and dark brown school backpack from the reference images. Use the planned scene and camera direction for this screen, preserve the front multi-pocket construction, zipper positions, shoulder straps and color blocking. Clean editorial lighting, realistic materials, one clear visual task, generous negative space, and a reserved approved-copy block with headline, subheadline, body and key-point hierarchy. Keep the typography area away from important product details.`,
+    visualPrompt: `A vertical 9:16 premium e-commerce product visual featuring the exact grey-white test storage pouch with test-blue and dark grey accents from the reference images. Use the planned scene and camera direction for this screen, preserve the front multi-pocket construction, zipper positions, shoulder straps and color blocking. Clean editorial lighting, realistic materials, one clear visual task, generous negative space, and a reserved approved-copy block with headline, subheadline, body and key-point hierarchy. Keep the typography area away from important product details.`,
     negativePrompt:
-      "wrong backpack structure, changed zipper count, changed colors, extra pockets, distorted straps, misspelled Chinese, missing characters, duplicated text, paraphrased copy, fake certification, extra claims, watermark, low resolution",
+      "wrong pouch structure, changed zipper count, changed colors, extra pockets, distorted straps, misspelled Chinese, missing characters, duplicated text, paraphrased copy, fake certification, extra claims, watermark, low resolution",
     geo: {
       query: `这款收纳包的${screen.primarySellingPoint}有什么可见特点？`,
       answer: `从图片可确认：${screen.evidenceIds

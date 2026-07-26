@@ -87,14 +87,25 @@ export function extractJsonObject<T>(text: string): T {
   const end = stripped.lastIndexOf("}");
   const candidate = start >= 0 && end > start ? stripped.slice(start, end + 1) : stripped;
 
+  let parsed: unknown;
   try {
-    return JSON.parse(candidate) as T;
+    parsed = JSON.parse(candidate);
   } catch {
     throw new SkillSuiteValidationError(
       "模型没有返回可解析的 JSON，未写入任何兜底业务数据。",
       "MODEL_JSON_INVALID"
     );
   }
+
+  // 语义是“提取 JSON 对象”：裸数组、null、标量都不是合法的业务载荷。
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new SkillSuiteValidationError(
+      "模型没有返回可解析的 JSON，未写入任何兜底业务数据。",
+      "MODEL_JSON_INVALID"
+    );
+  }
+
+  return parsed as T;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
