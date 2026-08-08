@@ -51,7 +51,6 @@ describe("privacy-safe project defaults", () => {
         id: "private-asset",
         name: "private-customer-file.jpg",
         dataUrl: "data:image/jpeg;base64,cHJpdmF0ZQ==",
-        kind: "product",
         size: 7
       }
     ]);

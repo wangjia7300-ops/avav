@@ -53,7 +53,7 @@ export function PlanningPanel({
     return (
       <section className="stage-empty">
         <span className="stage-empty-icon"><LockKey size={30} /></span>
-        <p className="eyebrow">技能 02 · 详情页策划</p>
+        <p className="eyebrow">阶段 02 · 详情页策划</p>
         <h1>请先完成图片研究</h1>
         <p>策划必须基于可验证事实库，不能跳过图研直接编写商业声明。</p>
       </section>
@@ -65,7 +65,7 @@ export function PlanningPanel({
       <section className="document-panel planning-document">
         <div className="document-titlebar">
           <div>
-            <p className="eyebrow">技能 02 · 详情页策划</p>
+            <p className="eyebrow">阶段 02 · 详情页策划</p>
             <h1>补齐模型看不到的业务信息</h1>
             <p>步骤1已完成产品分析；现在进行步骤2用户补充，之后才生成15屏策划。</p>
           </div>
@@ -123,7 +123,7 @@ export function PlanningPanel({
     <section className="document-panel">
       <div className="document-titlebar">
         <div>
-          <p className="eyebrow">技能 02 · 详情页策划</p>
+          <p className="eyebrow">阶段 02 · 详情页策划</p>
           <h1>15屏策划结构</h1>
           <p>{plan.productPositioning}</p>
         </div>

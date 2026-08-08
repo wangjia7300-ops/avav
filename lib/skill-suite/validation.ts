@@ -5,16 +5,16 @@ import type {
   EvidenceClaimScope,
   EvidenceFact,
   ProductResearch,
+  QACoverage,
   QAReport,
   QAFinding,
   ScreenCopy,
   ScreenExecution
 } from "@/lib/types";
 import {
-  APPROVED_COPY_BEGIN,
-  APPROVED_COPY_END,
-  compileScreenImagePrompt
-} from "@/lib/skill-suite/prompts";
+  compileScreenImagePrompt,
+  inspectJimengVisualInstruction
+} from "@/lib/skill-suite/jimeng-prompt-translator";
 import { checkCopyQuality } from "@/lib/skill-suite/copy-quality";
 import { findClaimGuardIssues } from "@/lib/skill-suite/claim-guard";
 import {
@@ -36,7 +36,13 @@ export class SkillSuiteValidationError extends Error {
     public readonly details: string[] = [],
     public readonly planIssues: PlanRepairIssue[] = [],
     public readonly meta?: Record<string, unknown>,
-    public readonly partialData?: unknown
+    public readonly partialData?: unknown,
+    /**
+     * 默认仍是业务校验错误 422。当校验层为了保留未发布草稿而
+     * 包装上游 ServiceError 时，必须透传真实 HTTP 状态，避免把超时/截断
+     * 误报成“契约无效”。
+     */
+    public readonly statusCode = 422
   ) {
     super(message);
     this.name = "SkillSuiteValidationError";
@@ -246,6 +252,18 @@ function screenCopyFields(copy: ScreenCopy) {
     ["副标题", copy.subheadline],
     ["正文", copy.body],
     ...copy.keyPoints.map((item, index) => [`要点${index + 1}`, item] as const)
+  ] as const;
+}
+
+function compiledCopyFields(copy: ScreenCopy) {
+  return [
+    ["标题", `主标题“${copy.headline}”`],
+    ["副标题", `副标题“${copy.subheadline}”`],
+    ["正文", `正文“${copy.body}”`],
+    ...copy.keyPoints.map(
+      (item, index) =>
+        [`要点${index + 1}`, `要点${index + 1}“${item}”`] as const
+    )
   ] as const;
 }
 
@@ -1023,6 +1041,17 @@ function rawPromptIssues(
   if (!/(?:9\s*:\s*16|vertical)/i.test(String(execution.visualPrompt ?? ""))) {
     issues.push(`${screen.id} visualPrompt 未声明9:16竖版`);
   }
+  if (!/[\u3400-\u9fff]/u.test(String(execution.visualPrompt ?? ""))) {
+    issues.push(`${screen.id} visualPrompt 不是即梦中文自然语言指令`);
+  }
+  if (String(execution.negativePrompt ?? "").trim().length > 120) {
+    issues.push(`${screen.id} 约束条件超过120字，仍像通用负面词库`);
+  }
+  inspectJimengVisualInstruction(
+    String(execution.visualInstruction ?? "")
+  ).forEach((issue) => {
+    issues.push(`${screen.id} ${issue.message}`);
+  });
   if (
     /(?:(?:commercialUse|evidenceIds|claimScope|generatedAt)\s*(?:=|:))|(?:commercial\s+use\s+allowed)|(?:approved\s+evidence\s+item)|(?:evidence\s+count)/i.test(
       rawBundle
@@ -1065,7 +1094,7 @@ export function parseExecutionDrafts(
 
     issues.push(...executionSchemaIssues(execution, execution.screenId, false));
     if (nonEmpty(execution.englishPrompt)) {
-      issues.push(`${execution.screenId} 模型不得预编译最终 English Prompt`);
+      issues.push(`${execution.screenId} 模型不得预编译最终即梦生图指令`);
     }
     if (
       isRecord(execution.copyFinal) &&
@@ -1141,17 +1170,27 @@ export function assertExecutions(
     if (execution.englishPrompt !== expectedPrompt) {
       issues.push(`${execution.screenId} 最终提示词不是服务端单次编译结果`);
     }
-    if (
-      countOccurrences(execution.englishPrompt, APPROVED_COPY_BEGIN) !== 1 ||
-      countOccurrences(execution.englishPrompt, APPROVED_COPY_END) !== 1
-    ) {
-      issues.push(`${execution.screenId} 定稿文案编译块数量不是1`);
+    compiledCopyFields(execution.copyFinal as ScreenCopy).forEach(
+      ([label, token]) => {
+        if (
+          token &&
+          countOccurrences(String(execution.englishPrompt), token) !== 1
+        ) {
+          issues.push(`${execution.screenId} ${label}未在即梦指令中精确出现一次`);
+        }
+      }
+    );
+    if (/APPROVED_COPY|Headline:|Subheadline:|Key points:/i.test(execution.englishPrompt)) {
+      issues.push(`${execution.screenId} 即梦指令仍泄漏旧版英文协议标记`);
     }
     if (
       nonEmpty(execution.negativePrompt) &&
-      execution.englishPrompt.includes(execution.negativePrompt.trim())
+      countOccurrences(
+        execution.englishPrompt,
+        execution.negativePrompt.trim()
+      ) !== 1
     ) {
-      issues.push(`${execution.screenId} 负面词被重复写入正向最终提示词`);
+      issues.push(`${execution.screenId} 约束条件未在即梦指令中精确注入一次`);
     }
     if (
       countOccurrences(execution.englishPrompt, "AI辅助生成") !== 1
@@ -1159,11 +1198,18 @@ export function assertExecutions(
       issues.push(`${execution.screenId} 最终提示词中的AI辅助生成标识数量不是1`);
     }
     if (
-      !execution.englishPrompt.includes(
-        "Use each reference image only to identify the product."
-      )
+      !execution.englishPrompt.includes("图1是产品主身份基准")
     ) {
       issues.push(`${execution.screenId} 最终提示词缺少参考图污染隔离指令`);
+    }
+    if (
+      execution.englishPrompt.length > 2_000 ||
+      !execution.englishPrompt.includes(screen.scene) ||
+      !execution.englishPrompt.includes(screen.shot) ||
+      !execution.englishPrompt.includes(screen.composition) ||
+      !execution.englishPrompt.includes(screen.proofMethod)
+    ) {
+      issues.push(`${execution.screenId} 即梦指令过长或缺少本屏场景、镜头、构图、证明方式`);
     }
   });
 
@@ -1191,11 +1237,15 @@ export function assertExecutions(
 }
 
 export function assertQAReport(value: unknown): asserts value is QAReport {
-  if (!isRecord(value) || !Array.isArray(value.findings) || !nonEmpty(value.summary)) {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.findings) ||
+    !nonEmpty(value.summary)
+  ) {
     throw new SkillSuiteValidationError("质检报告结构无效。", "QA_SCHEMA_INVALID");
   }
 
-  const valid = value.findings.every(
+  const findingsValid = value.findings.every(
     (finding) =>
       isRecord(finding) &&
       nonEmpty(finding.id) &&
@@ -1206,8 +1256,92 @@ export function assertQAReport(value: unknown): asserts value is QAReport {
       nonEmpty(finding.fix)
   );
 
-  if (!valid) {
+  if (!findingsValid) {
     throw new SkillSuiteValidationError("质检报告包含不完整问题项。", "QA_SCHEMA_INVALID");
+  }
+
+  const coverage = value.coverage;
+  const checks = value.checks;
+  if (
+    !["incomplete", "rules_only", "prompt_complete", "blocked"].includes(
+      String(value.status)
+    ) ||
+    !["not_ready", "review_required", "ready"].includes(
+      String(value.publishDecision)
+    ) ||
+    !["rules", "rules+model"].includes(String(value.source)) ||
+    !nonEmpty(value.generatedAt) ||
+    !isRecord(coverage) ||
+    coverage.expectedScreens !== 15 ||
+    ![
+      "planScreens",
+      "executionScreens",
+      "generatedImageScreens",
+      "pixelVerifiedScreens"
+    ].every(
+      (field) =>
+        typeof coverage[field] === "number" &&
+        Number.isInteger(coverage[field]) &&
+        Number(coverage[field]) >= 0
+    ) ||
+    ![
+      "missingPlanIds",
+      "missingExecutionIds",
+      "missingImageIds",
+      "unexpectedPlanIds",
+      "unexpectedExecutionIds"
+    ].every((field) => stringArray(coverage[field])) ||
+    !isRecord(checks) ||
+    !["rules", "semantic", "render", "pixel"].every((field) =>
+      ["evaluated", "not_evaluated"].includes(String(checks[field]))
+    ) ||
+    !Array.isArray(value.notEvaluated) ||
+    !value.notEvaluated.every(
+      (item) =>
+        isRecord(item) &&
+        ["semantic", "render", "pixel"].includes(String(item.check)) &&
+        item.status === "not_evaluated" &&
+        nonEmpty(item.reason) &&
+        (item.screenIds === undefined || stringArray(item.screenIds))
+    )
+  ) {
+    throw new SkillSuiteValidationError(
+      "质检报告缺少状态、覆盖率或未评估项。",
+      "QA_SCHEMA_INVALID"
+    );
+  }
+}
+
+export type QAModelResponse = Pick<QAReport, "findings" | "summary">;
+
+export function assertQAModelResponse(
+  value: unknown
+): asserts value is QAModelResponse {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.findings) ||
+    !nonEmpty(value.summary)
+  ) {
+    throw new SkillSuiteValidationError(
+      "语义质检报告结构无效。",
+      "QA_MODEL_SCHEMA_INVALID"
+    );
+  }
+  const findingsValid = value.findings.every(
+    (finding) =>
+      isRecord(finding) &&
+      nonEmpty(finding.id) &&
+      ["error", "warning", "pass"].includes(String(finding.severity)) &&
+      nonEmpty(finding.module) &&
+      nonEmpty(finding.title) &&
+      nonEmpty(finding.evidence) &&
+      nonEmpty(finding.fix)
+  );
+  if (!findingsValid) {
+    throw new SkillSuiteValidationError(
+      "语义质检报告包含不完整问题项。",
+      "QA_MODEL_SCHEMA_INVALID"
+    );
   }
 }
 
@@ -1230,12 +1364,108 @@ function finding(
   };
 }
 
+const EXPECTED_DETAIL_SCREEN_IDS = Array.from(
+  { length: 15 },
+  (_, index) => `screen-${String(index + 1).padStart(2, "0")}`
+);
+
+export function buildQACoverage(
+  plan: Pick<DetailPlan, "screens">,
+  executions: Record<string, ScreenExecution>,
+  options: {
+    generatedImageIds?: readonly string[];
+    pixelVerifiedIds?: readonly string[];
+  } = {}
+): QACoverage {
+  const expectedIds = new Set(EXPECTED_DETAIL_SCREEN_IDS);
+  const planIds = plan.screens
+    .map((screen) => screen.id)
+    .filter((screenId) => expectedIds.has(screenId));
+  const uniquePlanIds = new Set(planIds);
+  const rawPlanIds = plan.screens.map((screen) => screen.id);
+  const unexpectedPlanIds = [...new Set(
+    rawPlanIds.filter(
+      (screenId, index) =>
+        !expectedIds.has(screenId) || rawPlanIds.indexOf(screenId) !== index
+    )
+  )];
+
+  const executionEntries = Object.entries(executions);
+  const validExecutionIds = new Set(
+    executionEntries
+      .filter(
+        ([screenId, execution]) =>
+          expectedIds.has(screenId) &&
+          uniquePlanIds.has(screenId) &&
+          execution?.screenId === screenId
+      )
+      .map(([screenId]) => screenId)
+  );
+  const unexpectedExecutionIds = [...new Set(
+    executionEntries
+      .filter(
+        ([screenId, execution]) =>
+          !expectedIds.has(screenId) ||
+          !uniquePlanIds.has(screenId) ||
+          execution?.screenId !== screenId
+      )
+      .map(([screenId]) => screenId)
+  )];
+
+  const generatedImageIds = new Set(
+    (options.generatedImageIds ?? []).filter((screenId) =>
+      expectedIds.has(screenId)
+    )
+  );
+  const pixelVerifiedIds = new Set(
+    (options.pixelVerifiedIds ?? []).filter((screenId) =>
+      generatedImageIds.has(screenId)
+    )
+  );
+
+  return {
+    expectedScreens: 15,
+    planScreens: uniquePlanIds.size,
+    executionScreens: validExecutionIds.size,
+    generatedImageScreens: generatedImageIds.size,
+    pixelVerifiedScreens: pixelVerifiedIds.size,
+    missingPlanIds: EXPECTED_DETAIL_SCREEN_IDS.filter(
+      (screenId) => !uniquePlanIds.has(screenId)
+    ),
+    missingExecutionIds: EXPECTED_DETAIL_SCREEN_IDS.filter(
+      (screenId) => !validExecutionIds.has(screenId)
+    ),
+    missingImageIds: EXPECTED_DETAIL_SCREEN_IDS.filter(
+      (screenId) => !generatedImageIds.has(screenId)
+    ),
+    unexpectedPlanIds,
+    unexpectedExecutionIds
+  };
+}
+
+export function isQAInputComplete(coverage: QACoverage) {
+  return (
+    coverage.planScreens === coverage.expectedScreens &&
+    coverage.executionScreens === coverage.expectedScreens &&
+    coverage.missingPlanIds.length === 0 &&
+    coverage.missingExecutionIds.length === 0 &&
+    coverage.unexpectedPlanIds.length === 0 &&
+    coverage.unexpectedExecutionIds.length === 0
+  );
+}
+
 export function runDeterministicQA(
   plan: DetailPlan,
   executions: Record<string, ScreenExecution>,
   facts: readonly EvidenceFact[]
-) {
+): QAFinding[] {
   const results: QAFinding[] = [];
+  const coverage = buildQACoverage(plan, executions);
+  const hasCompletePlan =
+    coverage.planScreens === coverage.expectedScreens &&
+    coverage.missingPlanIds.length === 0 &&
+    coverage.unexpectedPlanIds.length === 0;
+  const hasCompleteExecutions = isQAInputComplete(coverage);
   const factById = new Map(facts.map((fact) => [fact.id, fact]));
   const headlineMap = new Map<string, string>();
   const copyQuality = checkCopyQuality(plan.screens);
@@ -1243,7 +1473,7 @@ export function runDeterministicQA(
     results.push(
       finding(
         issue.severity,
-        "用户文案",
+        "文案与转译语义一致性",
         issue.message,
         `${issue.path}；${issue.evidence}`,
         issue.suggestion,
@@ -1381,38 +1611,60 @@ export function runDeterministicQA(
           "error",
           "生图提示词",
           "最终提示词不是单次编译结果",
-          "English Prompt 与服务端根据 visualPrompt + 本屏文案编译的结果不一致。",
+          "最终即梦生图指令与服务端根据本屏视觉底稿 + 定稿文案编译的结果不一致。",
           "重新生成本屏交付，禁止在前端或模型层二次拼接文案。",
           screen.id
         )
       );
     }
+    const copyInjectionIssues = compiledCopyFields(execution.copyFinal).filter(
+      ([, token]) =>
+        token && countOccurrences(execution.englishPrompt, token) !== 1
+    );
+    if (copyInjectionIssues.length) {
+      results.push(
+        finding(
+          "error",
+          "生图提示词",
+          "定稿文案注入次数异常",
+          `以下字段没有在即梦指令中逐字出现一次：${copyInjectionIssues
+            .map(([label]) => label)
+            .join("、")}`,
+          "重新使用服务端即梦编译器，禁止模型层二次改写或重复文案。",
+          screen.id
+        )
+      );
+    }
     if (
-      countOccurrences(execution.englishPrompt, APPROVED_COPY_BEGIN) !== 1 ||
-      countOccurrences(execution.englishPrompt, APPROVED_COPY_END) !== 1
+      /APPROVED_COPY|Headline:|Subheadline:|Key points:/i.test(
+        execution.englishPrompt
+      )
     ) {
       results.push(
         finding(
           "error",
           "生图提示词",
-          "定稿文案编译块数量异常",
-          "最终提示词必须且只能包含一个 APPROVED_COPY 编译块。",
-          "使用服务端编译器重新生成，移除手工拼接。",
+          "泄漏旧版协议标记",
+          "最终指令仍包含 APPROVED_COPY 或英文文案字段标签。",
+          "改用即梦中文自然语言编译器和中文双引号文案。",
           screen.id
         )
       );
     }
     if (
       execution.negativePrompt.trim() &&
-      execution.englishPrompt.includes(execution.negativePrompt.trim())
+      countOccurrences(
+        execution.englishPrompt,
+        execution.negativePrompt.trim()
+      ) !== 1
     ) {
       results.push(
         finding(
           "error",
           "生图提示词",
-          "负面词被重复注入",
-          "negativePrompt 已出现在正向 English Prompt 中，发送请求时还会再次追加。",
-          "正向提示词不包含负面词，仅通过独立 negativePrompt 参数注入一次。",
+          "约束条件注入次数异常",
+          "本屏简短约束条件没有在最终即梦指令中精确出现一次。",
+          "约束只由服务端编译器注入一次；运行时不得再追加独立负面词。",
           screen.id
         )
       );
@@ -1436,16 +1688,14 @@ export function runDeterministicQA(
           "error",
           "AI合规",
           "最终画面指令未唯一写入AI标识",
-          "最终 English Prompt 必须明确要求“AI辅助生成”恰好出现一次。",
+          "最终即梦生图指令必须明确要求“AI辅助生成”恰好出现一次。",
           "重新使用服务端单次编译器，不只保存元数据字段。",
           screen.id
         )
       );
     }
     if (
-      !execution.englishPrompt.includes(
-        "Use each reference image only to identify the product."
-      )
+      !execution.englishPrompt.includes("图1是产品主身份基准")
     ) {
       results.push(
         finding(
@@ -1460,17 +1710,26 @@ export function runDeterministicQA(
     }
   });
 
-  if (!results.some((item) => item.module === "文案" && item.severity === "error")) {
+  if (
+    hasCompletePlan &&
+    !results.some((item) => item.module === "文案" && item.severity === "error")
+  ) {
     results.push(
       finding("pass", "文案", "15屏标题唯一", "未发现完全重复标题。", "保持现状。")
     );
   }
-  if (!results.some((item) => item.module === "证据" && item.severity === "error")) {
+  if (
+    hasCompletePlan &&
+    !results.some((item) => item.module === "证据" && item.severity === "error")
+  ) {
     results.push(
       finding("pass", "证据", "商业声明权限有效", "所有证据引用均指向可见事实或甲方授权的普通民用基础资料。", "保持现状。")
     );
   }
-  if (!results.some((item) => item.module === "AI合规" && item.severity === "error")) {
+  if (
+    hasCompleteExecutions &&
+    !results.some((item) => item.module === "AI合规" && item.severity === "error")
+  ) {
     results.push(
       finding("pass", "AI合规", "AI辅助生成标识完整", "已检查全部执行结果。", "保持现状。")
     );
@@ -1481,23 +1740,39 @@ export function runDeterministicQA(
       (executions[screen.id] &&
         !/(?:9\s*:\s*16|1440x2560|vertical)/i.test(executions[screen.id].englishPrompt))
   );
-  results.push(
-    invalidRatio.length
-      ? finding(
-          "error",
-          "移动端",
-          "9:16比例声明不完整",
-          `未完整声明的屏幕：${invalidRatio.map((screen) => screen.id).join("、")}`,
-          "策划构图与最终生图提示词同时写明9:16和1440x2560。"
-        )
-      : finding(
-          "pass",
-          "移动端",
-          "15屏固定9:16",
-          "策划构图与最终生图提示词均已声明9:16。",
-          "生成图片后继续检查真实像素。"
-        )
-  );
+  if (invalidRatio.length) {
+    results.push(
+      finding(
+        "error",
+        "移动端",
+        "9:16比例声明不完整",
+        `未完整声明的屏幕：${invalidRatio.map((screen) => screen.id).join("、")}`,
+        "策划构图与最终生图提示词同时写明9:16和1440x2560。"
+      )
+    );
+  } else if (hasCompleteExecutions) {
+    results.push(
+      finding(
+        "pass",
+        "移动端",
+        "15屏固定9:16",
+        "策划构图与最终生图提示词均已声明9:16。",
+        "生成图片后继续检查真实像素。"
+      )
+    );
+  }
+
+  if (!isQAInputComplete(coverage)) {
+    results.unshift(
+      finding(
+        "warning",
+        "质检覆盖",
+        "15屏质检输入不完整",
+        `策划 ${coverage.planScreens}/15，执行 ${coverage.executionScreens}/15；缺少执行：${coverage.missingExecutionIds.join("、") || "无"}。`,
+        "只补齐缺失、失败或已失效屏后重新运行；当前报告不得作为15屏全部通过依据。"
+      )
+    );
+  }
 
   return results;
 }

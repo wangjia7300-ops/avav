@@ -4,6 +4,11 @@ import { getEnvProviderConfig } from "@/lib/ai-providers";
 import { assertTrustedChatProviderConfig } from "@/lib/services/endpoint-guard";
 import { createAIChatCompletion } from "@/lib/services/openai-client";
 import { ServiceError } from "@/lib/services/errors";
+import {
+  API_BODY_LIMITS,
+  assertLocalApiRequest,
+  readJsonRequestBody
+} from "@/lib/security/request-guard";
 import { jsonNoStore } from "@/lib/skill-suite/server/http";
 import type { AIProviderConfig } from "@/lib/types";
 
@@ -29,6 +34,27 @@ const capabilities = [
 
 const tinyVisionTestImage =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAByUlEQVR42u2Zr08DMRTHbw0sQSwEUTTBoBGgCLIGewq1f2F+Qewf4F+YQs1iLlMLCgQaQ9BUECCBZBjESy6X9trturv+yL5PLe3l9v28vvfavut9/SyzlI1liRsAAAAAANS/dzxn43mqAKV0DwysO/V+GJADAAAAAAAAAAAAYJsBem5diWNxZ5p6Oz9URo4e300PvxbXvgEGe7ute/H79297Q2jHIXIOTq4szzzvPykjp59nluc/Xu43iSXWrnoHoxdaksp3CCn+trs/0jJaiu5afeMccF6HdWwx6SsjlzfLYACNbHoxtCDZMQID3HJe/hY5V2aLmVyJwWJQL3Kuq1fG9QCLJYRKieRvfVzkXJlyPEq0uw+Q+0kl6VOChFyu4OmBFH4FipmsjW8aLCb92ugKnANV9zeKND0TWJzur66DJQFwIwOAyLmpwJe1KMYkHkmpF/6V2RJpGRU5L+oOC8o+EN1GphdT005scX8sGxlpNTnbHmkhAUZS0iKQRNNp1H43CLwClM1VDNOZIuoLzfBhWnutSeZGtr5c7MRJA1DzjBppLZq/zlwXDBuqd2yvO7cBu+iwM/9/mYX9PoAqBAAAAAAAAIjJ/gExrMO8dzUj4QAAAABJRU5ErkJggg==";
+
+const modelTestSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    category: { type: "string" },
+    dominantColor: { type: "string" },
+    visibleFact: { type: "string" },
+    planningRole: { type: "string" },
+    executionMode: { type: "string" },
+    qaRule: { type: "string" }
+  },
+  required: [
+    "category",
+    "dominantColor",
+    "visibleFact",
+    "planningRole",
+    "executionMode",
+    "qaRule"
+  ]
+};
 
 function resolveConfig(config: AIProviderConfig) {
   if (!config.apiKey.trim() || !config.model.trim()) {
@@ -75,14 +101,14 @@ function parseTestResult(text: string) {
   try {
     parsed = JSON.parse(start >= 0 && end > start ? stripped.slice(start, end + 1) : stripped);
   } catch {
-    throw new ServiceError("模型已连接，但未通过四技能 JSON 协议测试。", {
+    throw new ServiceError("模型已连接，但未通过生产工作流 JSON 协议测试。", {
       statusCode: 422,
       code: "MODEL_RESPONSE_JSON_INVALID"
     });
   }
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new ServiceError("模型已连接，但未通过四技能 JSON 协议测试。", {
+    throw new ServiceError("模型已连接，但未通过生产工作流 JSON 协议测试。", {
       statusCode: 422,
       code: "MODEL_RESPONSE_JSON_INVALID"
     });
@@ -90,15 +116,39 @@ function parseTestResult(text: string) {
 
   const payload = parsed as Record<string, unknown>;
 
+  const requiredFields = [
+    "category",
+    "dominantColor",
+    "visibleFact",
+    "planningRole",
+    "executionMode",
+    "qaRule"
+  ] as const;
+
   if (
-    typeof payload.category !== "string" ||
-    typeof payload.dominantColor !== "string" ||
-    typeof payload.visibleFact !== "string" ||
-    !/蓝|青|靛|blue|navy|azure|cyan|indigo|cobalt|teal/i.test(payload.dominantColor)
+    requiredFields.some(
+      (field) =>
+        typeof payload[field] !== "string" ||
+        (payload[field] as string).trim().length === 0
+    )
   ) {
-    throw new ServiceError("模型未通过图片理解与事实提取测试。", {
+    throw new ServiceError("模型未返回完整的生产工作流能力字段。", {
       statusCode: 422,
-      code: "MODEL_VISION_UNSUPPORTED"
+      code: "MODEL_PRODUCTION_CAPABILITY_INCOMPLETE"
+    });
+  }
+
+  // 品类与执行方式允许模型使用自然语言表达；它们只需满足上方的
+  // 完整字段契约。连接测试真正需要确定的是模型是否读取了测试图，
+  // 因此只用图片主色作为视觉理解的确定性校验信号。
+  if (
+    !/蓝|青|靛|blue|navy|azure|cyan|indigo|cobalt|teal/i.test(
+      (payload.dominantColor as string).trim()
+    )
+  ) {
+    throw new ServiceError("模型未通过图片理解与生产工作流指令测试。", {
+      statusCode: 422,
+      code: "MODEL_PRODUCTION_CAPABILITY_UNSUPPORTED"
     });
   }
 }
@@ -141,7 +191,9 @@ function safeFailure(error: unknown) {
     field:
       code === "MODEL_ENDPOINT_INVALID"
         ? ("baseURL" as const)
-        : code.includes("VISION") || code.includes("RESPONSE")
+        : code.includes("VISION") ||
+            code.includes("RESPONSE") ||
+            code.includes("CAPABILITY")
           ? ("model" as const)
           : undefined,
     error:
@@ -152,27 +204,49 @@ function safeFailure(error: unknown) {
   };
 }
 
-export async function GET() {
-  const envConfig = getEnvProviderConfig();
-  return jsonNoStore({
-    success: true,
-    data: {
-      mode: "real",
-      ready: Boolean(envConfig),
-      hasServerConfig: Boolean(envConfig),
-      providerId: envConfig?.providerId ?? null,
-      model: envConfig?.model ?? null,
-      capabilities,
-      message: envConfig
-        ? `${envConfig.displayName ?? envConfig.providerId}/${envConfig.model} 已载入，建议执行一次生产协议测试。`
-        : "请在右上角配置文案模型，或在服务端设置 ARK_API_KEY。"
-    }
-  });
+export async function GET(request: Request) {
+  try {
+    assertLocalApiRequest(request, { method: "GET" });
+    const envConfig = getEnvProviderConfig();
+    return jsonNoStore({
+      success: true,
+      data: {
+        mode: "real",
+        ready: Boolean(envConfig),
+        hasServerConfig: Boolean(envConfig),
+        providerId: envConfig?.providerId ?? null,
+        model: envConfig?.model ?? null,
+        capabilities,
+        message: envConfig
+          ? `${envConfig.displayName ?? envConfig.providerId}/${envConfig.model} 已载入，建议执行一次生产协议测试。`
+          : "请在右上角配置文案模型，或在服务端设置 ARK_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY。"
+      }
+    });
+  } catch (error) {
+    const failure = safeFailure(error);
+    return jsonNoStore(
+      {
+        success: false,
+        error: failure.error,
+        code: failure.code,
+        retryable: failure.retryable
+      },
+      failure.status
+    );
+  }
 }
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json().catch(() => ({}))) as {
+    assertLocalApiRequest(request, {
+      method: "POST",
+      requireJson: true,
+      maxContentLength: API_BODY_LIMITS.modelTest
+    });
+    const body = (await readJsonRequestBody(
+      request,
+      API_BODY_LIMITS.modelTest
+    )) as {
       providerConfig?: AIProviderConfig;
     };
     const envConfig = getEnvProviderConfig();
@@ -208,10 +282,15 @@ export async function POST(request: Request) {
       messages: [
         {
           role: "system",
-          content: "你正在执行四技能工作流能力测试。不要推测，只返回完整JSON。"
+          content: "你正在执行生产工作流能力测试。不要推测，只返回完整JSON。"
         },
         { role: "user", content }
       ],
+      jsonSchema: {
+        name: "model_production_capability_test",
+        schema: modelTestSchema,
+        strict: true
+      },
       maxTokens: 600,
       timeoutMs: 120_000,
       maxTransportRetries: 1
@@ -226,7 +305,7 @@ export async function POST(request: Request) {
         providerId: config.providerId,
         model: config.model,
         capabilities,
-        message: `${config.providerId}/${config.model} 已通过图片理解与四技能 JSON 协议测试。`
+        message: `${config.providerId}/${config.model} 已通过图片理解与生产工作流 JSON 协议测试。`
       }
     });
   } catch (error) {

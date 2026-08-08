@@ -64,6 +64,7 @@ function collectConflictScreenIds(
 export class ApiError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly retryable: boolean;
   readonly details: string[];
   readonly meta: ApiMeta | null;
   readonly phase?: string;
@@ -85,6 +86,20 @@ export class ApiError extends Error {
     this.code = input.code
       ? sanitizeDiagnosticText(input.code)
       : undefined;
+    const explicitRetryable =
+      isRecord(input.details) &&
+      typeof input.details.retryable === "boolean"
+        ? input.details.retryable
+        : undefined;
+    const inferredRetryable =
+      [408, 429, 502, 503, 504].includes(input.status) ||
+      [
+        "AI_PROVIDER_TIMEOUT",
+        "AI_PROVIDER_RATE_LIMITED",
+        "AI_PROVIDER_REQUEST_FAILED",
+        "PLAN_TIME_BUDGET_EXCEEDED"
+      ].includes(this.code ?? "");
+    this.retryable = explicitRetryable ?? inferredRetryable;
     this.details = detailMessages(input.details);
     const responseMeta = sanitizeApiMeta(input.meta);
     const detailMeta = isRecord(input.details)
@@ -114,6 +129,7 @@ export function toWorkError(reason: unknown): WorkErrorInfo {
       message: reason.message,
       status: reason.status,
       code: reason.code,
+      retryable: reason.retryable,
       details: reason.details,
       meta: reason.meta ?? undefined,
       phase: reason.phase,

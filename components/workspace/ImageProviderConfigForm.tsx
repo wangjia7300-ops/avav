@@ -24,6 +24,7 @@ import type { ImageProviderConfig, ImageProviderId } from "@/lib/types";
 type ImageProviderConfigFormProps = {
   config: ImageProviderConfig;
   hasSavedConfig: boolean;
+  hasRetainedMetadata: boolean;
   isDraftSaved: boolean;
   error: string | null;
   errorField: "apiKey" | "baseURL" | "imageModel" | null;
@@ -34,6 +35,7 @@ type ImageProviderConfigFormProps = {
 export function ImageProviderConfigForm({
   config,
   hasSavedConfig,
+  hasRetainedMetadata,
   isDraftSaved,
   error,
   errorField,
@@ -44,9 +46,11 @@ export function ImageProviderConfigForm({
   const selectedPreset = getImageProviderPreset(config.providerId);
   const isCustom = config.providerId === "custom";
   const status = isDraftSaved
-    ? { label: "已保存", variant: "success" as const, icon: CheckCircle2 }
+    ? { label: "已保存 · 尚未出图验证", variant: "success" as const, icon: CheckCircle2 }
     : hasSavedConfig
       ? { label: "修改未保存", variant: "violet" as const, icon: Layers3 }
+      : hasRetainedMetadata
+        ? { label: "配置已保留 · 需输入 Key", variant: "violet" as const, icon: Key }
       : { label: "待配置", variant: "secondary" as const, icon: ImagePlus };
   const StatusIcon = status.icon;
 
@@ -191,7 +195,9 @@ export function ImageProviderConfigForm({
 
         <div className="flex items-start gap-2 rounded-md bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
           <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <p>配置仅保存在当前浏览器，发送生图请求时才会通过服务端转发给所选供应商。</p>
+          <p>
+            API Key 仅保存在当前页面内存，刷新或关闭页面后清除；供应商、模型和 Endpoint 会作为非敏感配置保留。
+          </p>
         </div>
 
         {error ? (

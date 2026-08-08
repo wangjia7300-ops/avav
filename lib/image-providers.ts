@@ -23,7 +23,7 @@ export const IMAGE_PROVIDER_PRESETS: ImageProviderPreset[] = [
     name: "OpenAI Images",
     baseURL: "https://api.openai.com/v1",
     defaultModel: "gpt-image-2",
-    description: "使用 OpenAI Images API 生成 9:16 竖版详情页视觉稿。",
+    description: "使用 OpenAI 原生竖图尺寸生成，并在服务端按安全区裁为严格 9:16。",
     modelPlaceholder: "例如：gpt-image-2（旧配置仍保留原模型）"
   },
   {
@@ -31,7 +31,7 @@ export const IMAGE_PROVIDER_PRESETS: ImageProviderPreset[] = [
     name: "自定义 Images API",
     baseURL: "",
     defaultModel: "",
-    description: "连接兼容 OpenAI Images API 的公开 HTTPS 服务。",
+    description: "连接兼容 OpenAI Images API 的公开 HTTPS 服务；按竖图尺寸生成后裁为 9:16。",
     modelPlaceholder: "输入兼容 Images API 的生图模型"
   }
 ];

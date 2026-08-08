@@ -47,7 +47,10 @@ describe("planning prompt contract", () => {
       targetIds: ["screen-06"]
     });
 
-    expect(prompt).toContain("只修复冲突屏");
+    expect(prompt).toContain("只修复一个冲突屏");
+    expect(prompt).toContain("只返回一个差异 patch");
+    expect(prompt).toContain('"screenId":"screen-06","changes"');
+    expect(prompt).not.toContain('"screenId":"screen-01","changes"');
     expect(prompt).toContain("screen-06");
     expect(prompt).toContain("标题给用户结论");
     expect(prompt).toContain("副标题给事实解释");

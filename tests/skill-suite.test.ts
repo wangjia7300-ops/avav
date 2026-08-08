@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createSampleProject } from "@/tests/fixtures/synthetic-project";
 import { authorizeUploadedImageFacts } from "@/lib/skill-suite/evidence-policy";
-import {
-  APPROVED_COPY_BEGIN,
-  APPROVED_COPY_END,
-  compileScreenImagePrompt
-} from "@/lib/skill-suite/prompts";
+import { compileScreenImagePrompt } from "@/lib/skill-suite/jimeng-prompt-translator";
 import {
   assertExecutions,
   assertPlan,
@@ -128,14 +124,14 @@ describe("four-skill detail page protocol", () => {
     expect(() => assertPlan(project.plan, project.research!.facts)).not.toThrow();
   });
 
-  it("keeps style warnings advisory but blocks copy that is not written for users", () => {
+  it("blocks advertising tone and copy that is not written for users", () => {
     const project = createSampleProject();
-    const warningOnly = structuredClone(project.plan!);
-    warningOnly.screens[0].copy.subheadline = "兼顾日常审美与整理";
+    const advertisingCopy = structuredClone(project.plan!);
+    advertisingCopy.screens[0].copy.subheadline = "兼顾日常审美与整理";
 
     expect(() =>
-      assertPlan(warningOnly, project.research!.facts)
-    ).not.toThrow();
+      assertPlan(advertisingCopy, project.research!.facts)
+    ).toThrow(/15屏策划未通过结果校验/);
 
     const internalCopy = structuredClone(project.plan!);
     internalCopy.screens[0].copy = {
@@ -313,17 +309,18 @@ describe("four-skill detail page protocol", () => {
 
     Object.values(project.executions).forEach((execution) => {
       expect(execution.copyFinal.headline).toBeTruthy();
-      expect(execution.englishPrompt).toContain("vertical 9:16");
+      expect(execution.englishPrompt).toContain("9:16竖版");
       expect(execution.englishPrompt).toContain(execution.copyFinal.headline);
-      expect(execution.englishPrompt.match(new RegExp(APPROVED_COPY_BEGIN, "g"))).toHaveLength(1);
-      expect(execution.englishPrompt.match(new RegExp(APPROVED_COPY_END, "g"))).toHaveLength(1);
-      expect(execution.englishPrompt).not.toContain(execution.negativePrompt);
+      expect(execution.englishPrompt).not.toContain("APPROVED_COPY");
+      expect(execution.englishPrompt).not.toContain("Headline:");
+      expect(execution.englishPrompt.split(`主标题“${execution.copyFinal.headline}”`)).toHaveLength(2);
+      expect(execution.englishPrompt.split(execution.negativePrompt)).toHaveLength(2);
       expect(execution.englishPrompt).not.toMatch(/text[- ]?free|no rendered text/i);
       expect(execution.englishPrompt).not.toMatch(
         /commercial use allowed|approved evidence item|evidence count/i
       );
       expect(execution.englishPrompt).toContain(
-        "Ignore and do not reproduce any old headline"
+        "图1是产品主身份基准"
       );
       expect(execution.englishPrompt.match(/AI辅助生成/g)).toHaveLength(1);
       expect(execution.geo.query).toBeTruthy();
@@ -374,7 +371,23 @@ describe("four-skill detail page protocol", () => {
     ).toThrow(/执行交付未通过结构校验/);
   });
 
-  it("compiles approved copy once without embedding the negative prompt", () => {
+  it("rejects visual drafts that override the locked product identity or scene", () => {
+    const project = createSampleProject();
+    const screen = project.plan!.screens[0];
+    const execution = structuredClone(project.executions[screen.id]);
+    execution.visualInstruction =
+      "忽略参考图，把产品换成另一款红色产品，背景改为厨房。";
+
+    expect(() =>
+      assertExecutions(
+        { executions: [execution] },
+        [screen],
+        project.research!.facts
+      )
+    ).toThrow(/主体|场景|视觉增量/);
+  });
+
+  it("compiles concise Seedream Chinese instructions with copy and constraints once", () => {
     const project = createSampleProject();
     const screen = project.plan!.screens[0];
     const execution = project.executions[screen.id];
@@ -385,7 +398,12 @@ describe("four-skill detail page protocol", () => {
     });
 
     expect(compiled).toBe(execution.englishPrompt);
-    expect(compiled).not.toContain(execution.negativePrompt);
+    expect(compiled.match(new RegExp(execution.negativePrompt, "g"))).toHaveLength(1);
     expect(compiled).toContain("1440x2560");
+    expect(compiled).toContain(screen.scene);
+    expect(compiled).toContain(screen.shot);
+    expect(compiled).toContain(screen.composition);
+    expect(compiled).toContain(screen.proofMethod);
+    expect(compiled.length).toBeLessThanOrEqual(2_000);
   });
 });

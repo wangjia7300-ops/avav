@@ -1,17 +1,22 @@
 "use client";
 
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import {
   isImageProviderConfigComplete,
   normalizeImageProviderConfig,
   parseImageProviderConfig
 } from "@/lib/image-providers";
 import type { ImageProviderConfig } from "@/lib/types";
+import {
+  createProviderMetadataStorage,
+  toProviderMetadataConfig
+} from "@/lib/provider-secret-storage";
 
 type ImageProviderStoreState = {
   config: ImageProviderConfig | null;
   isConfigured: boolean;
+  legacyKeyMigrated: boolean;
 };
 
 type ImageProviderStoreActions = {
@@ -27,17 +32,19 @@ export const useImageProviderStore = create<
     (set, get) => ({
       config: null,
       isConfigured: false,
+      legacyKeyMigrated: false,
 
       setConfig: (config) => {
         const normalized = normalizeImageProviderConfig(config);
         set({
           config: normalized,
-          isConfigured: isImageProviderConfigComplete(normalized)
+          isConfigured: isImageProviderConfigComplete(normalized),
+          legacyKeyMigrated: false
         });
       },
 
       resetConfig: () => {
-        set({ config: null, isConfigured: false });
+        set({ config: null, isConfigured: false, legacyKeyMigrated: false });
       },
 
       getActiveConfig: () => {
@@ -47,19 +54,29 @@ export const useImageProviderStore = create<
     }),
     {
       name: "image-provider-config",
-      version: 1,
+      version: 2,
+      storage: createJSONStorage(() =>
+        createProviderMetadataStorage(window.localStorage)
+      ),
       partialize: (state) => ({
-        config: state.config
+        config: toProviderMetadataConfig(state.config)
       }),
+      migrate: (persistedState) => persistedState,
       merge: (persistedState, currentState) => {
-        const persisted = persistedState as { config?: unknown };
+        const persisted = persistedState as {
+          config?: unknown;
+          legacyKeyMigrated?: unknown;
+        };
         const config = parseImageProviderConfig(persisted.config);
         const isConfigured = Boolean(config && isImageProviderConfigComplete(config));
 
         return {
           ...currentState,
-          config: isConfigured ? config : null,
-          isConfigured
+          config,
+          isConfigured,
+          legacyKeyMigrated:
+            persisted.legacyKeyMigrated === true &&
+            Boolean(config?.apiKey.trim())
         };
       }
     }

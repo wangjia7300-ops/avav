@@ -64,6 +64,7 @@ function fallbackFailure(message = "模型连接测试失败，请检查配置�
 export function APISettingsDialog({ open, onClose }: APISettingsDialogProps) {
   const savedConfig = useProviderStore((state) => state.config);
   const hasSavedProvider = useProviderStore((state) => state.isConfigured);
+  const legacyKeyMigrated = useProviderStore((state) => state.legacyKeyMigrated);
   const setSavedConfig = useProviderStore((state) => state.setConfig);
   const resetSavedConfig = useProviderStore((state) => state.resetConfig);
   const [mounted, setMounted] = useState(false);
@@ -118,6 +119,7 @@ export function APISettingsDialog({ open, onClose }: APISettingsDialogProps) {
   }, []);
 
   const hasSavedConfig = Boolean(hasSavedProvider && savedConfig);
+  const hasRetainedMetadata = Boolean(savedConfig);
   const isDraftSaved = useMemo(
     () =>
       Boolean(
@@ -367,7 +369,9 @@ export function APISettingsDialog({ open, onClose }: APISettingsDialogProps) {
             {hasSavedConfig && !isDraftSaved ? (
               <div className="mt-4 flex items-start gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
                 <ShieldCheck className="mt-1 h-4 w-4 shrink-0" />
-                <p className="leading-6">本次失败配置未保存，之前已保存的配置仍然保留。</p>
+                <p className="leading-6">
+                  本次失败配置未启用，本次页面打开期间已验证的配置仍然保留。
+                </p>
               </div>
             ) : null}
 
@@ -385,6 +389,17 @@ export function APISettingsDialog({ open, onClose }: APISettingsDialogProps) {
         </div>
       ) : (
         <div className="space-y-4">
+          {legacyKeyMigrated ? (
+            <div
+              role="status"
+              className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+            >
+              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
+              <p className="leading-6">
+                旧版 API Key 已从浏览器持久化记录中移除；本次页面打开期间仍可继续使用，刷新或关闭页面后需重新输入。
+              </p>
+            </div>
+          ) : null}
           {serverStatusLoading ? (
             <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -427,6 +442,7 @@ export function APISettingsDialog({ open, onClose }: APISettingsDialogProps) {
             config={draft}
             phase={phase}
             hasSavedConfig={hasSavedConfig}
+            hasRetainedMetadata={hasRetainedMetadata}
             isDraftSaved={isDraftSaved}
             onChange={handleDraftChange}
             onAutoTest={handleAutoTest}
@@ -438,6 +454,7 @@ export function APISettingsDialog({ open, onClose }: APISettingsDialogProps) {
             result={result}
             error={failure?.message ?? null}
             hasSavedConfig={hasSavedConfig}
+            hasRetainedMetadata={hasRetainedMetadata}
             isDraftSaved={isDraftSaved}
             canTest={canTest}
             onTest={handleManualTest}

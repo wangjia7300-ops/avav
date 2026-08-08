@@ -1,6 +1,7 @@
 export type AIProviderId =
   | "openai"
   | "volcengine"
+  | "gemini"
   | "anthropic"
   | "zhipu"
   | "custom";
@@ -41,11 +42,10 @@ export type ProjectAsset = {
   id: string;
   name: string;
   dataUrl: string;
-  kind: "product" | "detail" | "scene";
   size: number;
 };
 
-export type EvidenceStatus = "verified" | "candidate" | "blocked";
+type EvidenceStatus = "verified" | "candidate" | "blocked";
 
 export type EvidenceSourceType =
   | "visual_observation"
@@ -127,12 +127,15 @@ export type SupplementalBrief = {
   notes: string;
 };
 
-export type ScreenCopy = {
+type CopyBlock = {
   headline: string;
   subheadline: string;
   body: string;
   keyPoints: string[];
 };
+
+/** Backward-compatible name for the authoritative per-screen CopyBlock. */
+export type ScreenCopy = CopyBlock;
 
 export type DetailScreen = {
   id: string;
@@ -160,7 +163,7 @@ export type DetailScreen = {
   transition: string;
 };
 
-export type AudiencePersona = {
+type AudiencePersona = {
   name: string;
   context: string;
   pain: string;
@@ -193,7 +196,9 @@ export type ScreenExecution = {
   copyFinal: ScreenCopy;
   visualInstruction: string;
   visualPrompt: string;
+  /** 历史字段名；当前保存服务端编译、实际发送给即梦的中文生图指令。 */
   englishPrompt: string;
+  /** 历史字段名；当前仅表示一条简短中文约束，不是独立 API 参数。 */
   negativePrompt: string;
   geo: {
     query: string;
@@ -214,7 +219,17 @@ export type ScreenExecution = {
   generatedAt: string;
 };
 
-export type QAFindingSeverity = "error" | "warning" | "pass";
+export type ExecutionRunStatus =
+  | "not_started"
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed_retryable"
+  | "blocked"
+  | "stale"
+  | "cancelled";
+
+type QAFindingSeverity = "error" | "warning" | "pass";
 
 export type QAFinding = {
   id: string;
@@ -226,10 +241,50 @@ export type QAFinding = {
   fix: string;
 };
 
+type QAStatus =
+  | "incomplete"
+  | "rules_only"
+  | "prompt_complete"
+  | "blocked";
+
+type QACheckState = "evaluated" | "not_evaluated";
+
+export type QACoverage = {
+  expectedScreens: 15;
+  planScreens: number;
+  executionScreens: number;
+  generatedImageScreens: number;
+  pixelVerifiedScreens: number;
+  missingPlanIds: string[];
+  missingExecutionIds: string[];
+  missingImageIds: string[];
+  unexpectedPlanIds: string[];
+  unexpectedExecutionIds: string[];
+};
+
+export type QANotEvaluated = {
+  check: "semantic" | "render" | "pixel";
+  status: "not_evaluated";
+  reason: string;
+  screenIds?: string[];
+};
+
+type PublishDecision = "not_ready" | "review_required" | "ready";
+
 export type QAReport = {
+  status: QAStatus;
+  coverage: QACoverage;
+  checks: {
+    rules: QACheckState;
+    semantic: QACheckState;
+    render: QACheckState;
+    pixel: QACheckState;
+  };
+  notEvaluated: QANotEvaluated[];
+  publishDecision: PublishDecision;
   findings: QAFinding[];
   summary: string;
-  source: "rules+model";
+  source: "rules" | "rules+model";
   generatedAt: string;
 };
 

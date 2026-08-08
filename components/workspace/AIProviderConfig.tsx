@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Eye,
   EyeOff,
+  ExternalLink,
   FlaskConical,
   Globe,
   Image as ImageIcon,
@@ -67,6 +68,7 @@ type AIProviderConfigProps = {
   config: AIProviderConfig;
   phase: ModelTestPhase;
   hasSavedConfig: boolean;
+  hasRetainedMetadata: boolean;
   isDraftSaved: boolean;
   onChange: (config: AIProviderConfig) => void;
   onAutoTest: (config: AIProviderConfig) => void;
@@ -77,6 +79,7 @@ export function AIProviderConfig({
   config,
   phase,
   hasSavedConfig,
+  hasRetainedMetadata,
   isDraftSaved,
   onChange,
   onAutoTest,
@@ -97,13 +100,15 @@ export function AIProviderConfig({
   const status = isTesting
     ? { label: "自动测试中", variant: "violet" as const, icon: Loader2 }
     : phase === "verified" && isDraftSaved
-      ? { label: "已验证", variant: "success" as const, icon: CheckCircle2 }
+      ? { label: "已验证 · 本次打开可用", variant: "success" as const, icon: CheckCircle2 }
       : phase === "failed"
         ? { label: "测试失败", variant: "secondary" as const, icon: ShieldAlert }
         : hasSavedConfig && !isDraftSaved
           ? { label: "修改待验证", variant: "violet" as const, icon: FlaskConical }
           : hasSavedConfig
-            ? { label: "已保存 · 待验证", variant: "default" as const, icon: FlaskConical }
+            ? { label: "本次打开可用", variant: "default" as const, icon: FlaskConical }
+            : hasRetainedMetadata
+              ? { label: "配置已保留 · 需输入 Key", variant: "violet" as const, icon: Key }
             : { label: "待配置", variant: "secondary" as const, icon: FlaskConical };
   const StatusIcon = status.icon;
 
@@ -121,7 +126,7 @@ export function AIProviderConfig({
               AI 供应商配置
             </CardTitle>
             <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              填完整配置后，离开输入框会自动测试；只有测试通过的配置才会保存到浏览器。
+              填完整配置后，离开输入框会自动测试；测试通过的 API Key 只在本次页面打开期间使用。
             </p>
           </div>
           <Badge variant={status.variant} className="h-fit gap-1">
@@ -185,6 +190,8 @@ export function AIProviderConfig({
               placeholder={
                 selectedProviderId === "openai"
                   ? "sk-..."
+                  : selectedProviderId === "gemini"
+                    ? "AIza..."
                   : selectedProviderId === "anthropic"
                     ? "sk-ant-..."
                     : "输入 API Key"
@@ -200,6 +207,20 @@ export function AIProviderConfig({
               {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </button>
           </div>
+          {selectedProviderId === "gemini" ? (
+            <p className="text-xs leading-5 text-muted-foreground">
+              还没有 Gemini API Key？
+              <a
+                href="https://aistudio.google.com/app/apikey"
+                target="_blank"
+                rel="noreferrer"
+                className="ml-1 inline-flex items-center gap-1 font-medium text-primary hover:underline"
+              >
+                在 Google AI Studio 创建
+                <ExternalLink className="h-3 w-3" aria-hidden="true" />
+              </a>
+            </p>
+          ) : null}
         </div>
 
         {isCustom ? (
@@ -287,7 +308,8 @@ export function AIProviderConfig({
         <div className="flex items-start gap-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">
           <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <p>
-            API Key 仅通过 HTTPS 发送到服务端进行测试；测试通过后保存在当前浏览器，不会写入项目文件或服务端数据库。
+            API Key 仅随本机同源请求发送给应用服务端，再由服务端转发到供应商的
+            HTTPS 接口；密钥只保存在当前页面内存，刷新或关闭后自动清除。
           </p>
         </div>
 

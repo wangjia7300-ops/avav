@@ -187,7 +187,7 @@ function collectNumericRangeConflict(fact: UnknownRecord) {
   return [...rangesByKey.values()];
 }
 
-export type ResearchStructureIssueCode =
+type ResearchStructureIssueCode =
   | "ROOT_NOT_OBJECT"
   | "MISSING_FIELD"
   | "TYPE_MISMATCH"

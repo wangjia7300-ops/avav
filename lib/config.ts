@@ -1,3 +1,6 @@
 export const MAX_UPLOAD_IMAGE_BYTES = 8 * 1024 * 1024;
-export const MAX_UPLOAD_IMAGE_COUNT = 5;
+export const MAX_UPLOAD_IMAGE_COUNT = 9;
 export const MAX_TOTAL_UPLOAD_IMAGE_BYTES = 24 * 1024 * 1024;
+export const MAX_UPLOAD_IMAGE_EDGE = 8_000;
+export const MAX_UPLOAD_IMAGE_PIXELS = 24_000_000;
+export const REFERENCE_IMAGE_MAX_EDGE = 1_024;

@@ -69,6 +69,46 @@ describe("sanitizeApiErrorDetails", () => {
     ).toBeUndefined();
   });
 
+  it("仅保留范围合法且交叉一致的尝试次数和上游状态", () => {
+    expect(
+      sanitizeApiErrorDetails({
+        failureOrigin: "upstream_http",
+        attempt: 2,
+        maxAttempts: 3,
+        upstreamStatus: 504
+      })
+    ).toEqual({
+      failureOrigin: "upstream_http",
+      attempt: 2,
+      maxAttempts: 3,
+      upstreamStatus: 504
+    });
+
+    expect(
+      sanitizeApiErrorDetails({ attempt: 0, maxAttempts: 2 })
+    ).toBeUndefined();
+    expect(
+      sanitizeApiErrorDetails({ attempt: 3, maxAttempts: 2 })
+    ).toBeUndefined();
+    expect(sanitizeApiErrorDetails({ attempt: 1 })).toBeUndefined();
+    expect(sanitizeApiErrorDetails({ maxAttempts: 2 })).toBeUndefined();
+    expect(
+      sanitizeApiErrorDetails({
+        failureOrigin: "sdk_timeout",
+        upstreamStatus: 504
+      })
+    ).toEqual({ failureOrigin: "sdk_timeout" });
+    expect(
+      sanitizeApiErrorDetails({ failureOrigin: "unknown" })
+    ).toEqual({ failureOrigin: "unknown" });
+    expect(
+      sanitizeApiErrorDetails({ failureOrigin: "connection_timeout" })
+    ).toEqual({ failureOrigin: "connection_timeout" });
+    expect(
+      sanitizeApiErrorDetails({ failureOrigin: "stream_event" })
+    ).toEqual({ failureOrigin: "stream_event" });
+  });
+
   it("非对象输入或清洗后为空对象时返回 undefined", () => {
     expect(sanitizeApiErrorDetails(undefined)).toBeUndefined();
     expect(sanitizeApiErrorDetails(null)).toBeUndefined();
@@ -110,6 +150,37 @@ describe("ServiceError", () => {
 });
 
 describe("serializeApiError", () => {
+  it("请求 ID 不会通过 ServiceError.message 或 details 进入 API 响应", () => {
+    const error = new ServiceError(
+      "上游请求失败，requestId=req-sensitive-value，x-request-id: trace-private-value，api_key=ark-private-secret-value，/Users/private/customer.json",
+      {
+        statusCode: 502,
+        code: "AI_PROVIDER_REQUEST_FAILED",
+        details: {
+          failureOrigin: "unknown",
+          requestId: "req-sensitive-value",
+          request_id: "req-sensitive-value-2",
+          "x-request-id": "trace-private-value"
+        } as never
+      }
+    );
+
+    const result = serializeApiError(error, "模型供应商暂时不可用。");
+
+    expect(error.message).not.toContain("req-sensitive-value");
+    expect(error.message).not.toContain("trace-private-value");
+    expect(error.message).not.toContain("ark-private-secret-value");
+    expect(error.message).not.toContain("/Users/private");
+    expect(result.body.error).not.toContain("req-sensitive-value");
+    expect(result.body.error).not.toContain("trace-private-value");
+    expect(result.body.error).not.toContain("ark-private-secret-value");
+    expect(result.body.error).not.toContain("/Users/private");
+    expect(result.body.details).toEqual({
+      code: "AI_PROVIDER_REQUEST_FAILED",
+      failureOrigin: "unknown"
+    });
+  });
+
   it("对 ServiceError 保留 message/code/状态码并合并清洗后的 details", () => {
     const error = new ServiceError("文案模型响应超时", {
       statusCode: 504,
@@ -147,6 +218,16 @@ describe("serializeApiError", () => {
     expect(serialized).not.toContain("sk-live-12345");
     expect(serialized).not.toContain("内部堆栈信息");
     expect(serialized).not.toContain("Bearer");
+  });
+
+  it("未知错误的兜底文案也经过敏感信息清洗", () => {
+    const result = serializeApiError(
+      new Error("raw provider failure"),
+      "请求失败 request_id=req-fallback-private api_key=ark-fallback-private-value"
+    );
+
+    expect(result.body.error).not.toContain("req-fallback-private");
+    expect(result.body.error).not.toContain("ark-fallback-private-value");
   });
 
   it("对非 Error 的抛出值（字符串/undefined）同样走兜底分支", () => {

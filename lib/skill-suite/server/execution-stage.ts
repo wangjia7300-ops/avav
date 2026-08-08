@@ -1,8 +1,8 @@
 import {
   buildExecutionPrompt,
-  buildExecutionRepairPrompt,
-  compileScreenImagePrompt
+  buildExecutionRepairPrompt
 } from "@/lib/skill-suite/prompts";
+import { compileScreenImagePrompt } from "@/lib/skill-suite/jimeng-prompt-translator";
 import {
   assertExecutions,
   assertPlan,
@@ -18,7 +18,8 @@ import type { SkillSuiteRequest } from "./request";
 
 export async function runExecutionStage(
   body: Extract<SkillSuiteRequest, { stage: "execution" }>,
-  providerConfig: AIProviderConfig
+  providerConfig: AIProviderConfig,
+  signal?: AbortSignal
 ) {
   assertResearch(body.research);
   assertPlan(body.plan, body.research.facts);
@@ -44,7 +45,12 @@ export async function runExecutionStage(
     body.plan,
     body.mode
   );
-  const text = await complete(providerConfig, textMessages(prompt), 9000);
+  const text = await complete(
+    providerConfig,
+    textMessages(prompt),
+    9000,
+    { signal }
+  );
   let parsed = extractJsonObject<unknown>(text);
   let drafts;
   let repairCount = 0;
@@ -75,7 +81,8 @@ export async function runExecutionStage(
       const repairedText = await complete(
         providerConfig,
         textMessages(repairPrompt),
-        9_000
+        9_000,
+        { signal }
       );
       parsed = extractJsonObject<unknown>(repairedText);
     }

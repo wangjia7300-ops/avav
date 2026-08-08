@@ -1,3 +1,12 @@
+type ProviderFailureOrigin =
+  | "sdk_timeout"
+  | "connection_timeout"
+  | "upstream_http"
+  | "stream_event"
+  | "network"
+  | "stage_budget"
+  | "unknown";
+
 export type SafeApiErrorDetails = {
   stage?: string;
   code?: string;
@@ -8,12 +17,44 @@ export type SafeApiErrorDetails = {
   field?: string;
   screenIds?: string[];
   normalizedValue?: string;
+  failureOrigin?: ProviderFailureOrigin;
+  attempt?: number;
+  maxAttempts?: number;
+  upstreamStatus?: number;
+  hasUpstreamRequestId?: boolean;
 };
 
 const detailTokenPattern = /^[A-Za-z0-9_.-]{1,96}$/;
 const screenIdPattern = /^screen-\d{2}$/;
 const suspiciousSecretPattern =
   /(?:api[_-]?key|authorization|bearer|token|secret|password|sk-[A-Za-z0-9_-]+|ark-[A-Za-z0-9_-]+)/i;
+const requestIdAssignmentPattern =
+  /\b((?:x[\s_-]?)?request[\s_-]?id)\b(\s*[:=]\s*)["']?[^"',，。；;\s}]+["']?/gi;
+
+function safePublicErrorMessage(value: string) {
+  return value
+    .replace(
+      requestIdAssignmentPattern,
+      (_match, label: string, separator: string) =>
+        `${label}${separator}[已隐藏]`
+    )
+    .replace(
+      /(["']?api[_-]?key["']?\s*[:=]\s*["']?)[^"',}，。；;\s]+/gi,
+      "$1[已隐藏]"
+    )
+    .replace(/\bBearer\s+[^\s"',，。；;]+/gi, "Bearer [已隐藏]")
+    .replace(
+      /\b(?:ark|sk)-[A-Za-z0-9][A-Za-z0-9_-]{8,}\b/g,
+      "[API_KEY已隐藏]"
+    )
+    .replace(
+      /data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+/gi,
+      "[图片数据已隐藏]"
+    )
+    .replace(/file:\/\/\/[^\n\r；;]+/gi, "[本机路径已隐藏]")
+    .replace(/\/(?:Users|Volumes)\/[^\n\r；;]+/g, "[本机路径已隐藏]")
+    .replace(/[A-Za-z]:\\[^\n\r；;]+/g, "[本机路径已隐藏]");
+}
 
 function safeDetailToken(value: unknown) {
   return typeof value === "string" && detailTokenPattern.test(value)
@@ -67,6 +108,50 @@ export function sanitizeApiErrorDetails(
     typeof candidate.retryable === "boolean"
       ? candidate.retryable
       : undefined;
+  const failureOrigin = [
+    "sdk_timeout",
+    "connection_timeout",
+    "upstream_http",
+    "stream_event",
+    "network",
+    "stage_budget",
+    "unknown"
+  ].includes(String(candidate.failureOrigin))
+    ? (candidate.failureOrigin as ProviderFailureOrigin)
+    : undefined;
+  const candidateAttempt =
+    Number.isInteger(candidate.attempt) &&
+    Number(candidate.attempt) >= 1 &&
+    Number(candidate.attempt) <= 3
+      ? Number(candidate.attempt)
+      : undefined;
+  const candidateMaxAttempts =
+    Number.isInteger(candidate.maxAttempts) &&
+    Number(candidate.maxAttempts) >= 1 &&
+    Number(candidate.maxAttempts) <= 3
+      ? Number(candidate.maxAttempts)
+      : undefined;
+  const hasConsistentAttemptPair =
+    candidateAttempt !== undefined &&
+    candidateMaxAttempts !== undefined &&
+    candidateAttempt <= candidateMaxAttempts;
+  const attempt = hasConsistentAttemptPair
+    ? candidateAttempt
+    : undefined;
+  const maxAttempts = hasConsistentAttemptPair
+    ? candidateMaxAttempts
+    : undefined;
+  const upstreamStatus =
+    failureOrigin === "upstream_http" &&
+    Number.isInteger(candidate.upstreamStatus) &&
+    Number(candidate.upstreamStatus) >= 400 &&
+    Number(candidate.upstreamStatus) <= 599
+      ? Number(candidate.upstreamStatus)
+      : undefined;
+  const hasUpstreamRequestId =
+    typeof candidate.hasUpstreamRequestId === "boolean"
+      ? candidate.hasUpstreamRequestId
+      : undefined;
   const normalizedValue = safeNormalizedValue(candidate.normalizedValue);
   const screenIds = Array.isArray(candidate.screenIds)
     ? Array.from(
@@ -87,7 +172,14 @@ export function sanitizeApiErrorDetails(
     ...(retryable !== undefined ? { retryable } : {}),
     ...(field ? { field } : {}),
     ...(screenIds?.length ? { screenIds } : {}),
-    ...(normalizedValue ? { normalizedValue } : {})
+    ...(normalizedValue ? { normalizedValue } : {}),
+    ...(failureOrigin ? { failureOrigin } : {}),
+    ...(attempt !== undefined ? { attempt } : {}),
+    ...(maxAttempts !== undefined ? { maxAttempts } : {}),
+    ...(upstreamStatus !== undefined ? { upstreamStatus } : {}),
+    ...(hasUpstreamRequestId !== undefined
+      ? { hasUpstreamRequestId }
+      : {})
   };
 
   return Object.keys(details).length ? details : undefined;
@@ -106,7 +198,7 @@ export class ServiceError extends Error {
       details?: SafeApiErrorDetails;
     }
   ) {
-    super(message);
+    super(safePublicErrorMessage(message));
     this.name = "ServiceError";
     this.statusCode = options?.statusCode ?? 500;
     this.code = options?.code ?? "SERVICE_ERROR";
@@ -148,7 +240,7 @@ export function serializeApiError(
       // Unknown exceptions may contain provider payloads, request headers or
       // other unreviewed text. Only curated ServiceError messages may cross the
       // API boundary.
-      error: fallbackMessage,
+      error: safePublicErrorMessage(fallbackMessage),
       code: "UNKNOWN_ERROR",
       ...(details ? { details } : {})
     },

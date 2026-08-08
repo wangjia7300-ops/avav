@@ -1,18 +1,24 @@
 "use client";
 
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import type { AIProviderConfig, AIProviderId } from "@/lib/types";
 import { PRESET_PROVIDERS } from "@/lib/ai-providers";
 import type { ProviderPreset } from "@/lib/ai-providers";
+import {
+  createProviderMetadataStorage,
+  toProviderMetadataConfig
+} from "@/lib/provider-secret-storage";
 
 // ── Store state ───────────────────────────────────────────────────
 
 export type ProviderStoreState = {
   /** Currently selected provider config, null = use server env fallback */
   config: AIProviderConfig | null;
-  /** Whether user has manually configured a provider */
+  /** Whether this page currently holds a complete, usable configuration */
   isConfigured: boolean;
+  /** A legacy localStorage key was scrubbed and moved into page memory once */
+  legacyKeyMigrated: boolean;
 };
 
 type ProviderStoreActions = {
@@ -87,6 +93,7 @@ export const useProviderStore = create<ProviderStoreState & ProviderStoreActions
       // State
       config: null,
       isConfigured: false,
+      legacyKeyMigrated: false,
 
       // Actions
       selectPreset: (providerId: AIProviderId) => {
@@ -96,7 +103,8 @@ export const useProviderStore = create<ProviderStoreState & ProviderStoreActions
 
         set({
           config: createDefaultConfig(providerId),
-          isConfigured: false
+          isConfigured: false,
+          legacyKeyMigrated: false
         });
       },
 
@@ -105,7 +113,8 @@ export const useProviderStore = create<ProviderStoreState & ProviderStoreActions
         const nextConfig = { ...config, apiKey };
         set({
           config: nextConfig,
-          isConfigured: isAIProviderConfigComplete(nextConfig)
+          isConfigured: isAIProviderConfigComplete(nextConfig),
+          legacyKeyMigrated: false
         });
       },
 
@@ -130,12 +139,13 @@ export const useProviderStore = create<ProviderStoreState & ProviderStoreActions
       setConfig: (config: AIProviderConfig) => {
         set({
           config,
-          isConfigured: isAIProviderConfigComplete(config)
+          isConfigured: isAIProviderConfigComplete(config),
+          legacyKeyMigrated: false
         });
       },
 
       resetConfig: () => {
-        set({ config: null, isConfigured: false });
+        set({ config: null, isConfigured: false, legacyKeyMigrated: false });
       },
 
       getActiveConfig: () => {
@@ -145,19 +155,30 @@ export const useProviderStore = create<ProviderStoreState & ProviderStoreActions
     }),
     {
       name: "ai-provider-config",
-      // Only persist config + isConfigured
+      version: 2,
+      storage: createJSONStorage(() =>
+        createProviderMetadataStorage(window.localStorage)
+      ),
+      // API keys stay in Zustand memory for the current page lifetime. Only
+      // provider/model/endpoint metadata is allowed into localStorage.
       partialize: (state) => ({
-        config: state.config,
-        isConfigured: state.isConfigured
+        config: toProviderMetadataConfig(state.config)
       }),
+      migrate: (persistedState) => persistedState,
       merge: (persistedState, currentState) => {
-        const persisted = persistedState as { config?: unknown };
+        const persisted = persistedState as {
+          config?: unknown;
+          legacyKeyMigrated?: unknown;
+        };
         const config = sanitizeStoredAIProviderConfig(persisted.config);
 
         return {
           ...currentState,
           config,
-          isConfigured: Boolean(config && isAIProviderConfigComplete(config))
+          isConfigured: Boolean(config && isAIProviderConfigComplete(config)),
+          legacyKeyMigrated:
+            persisted.legacyKeyMigrated === true &&
+            Boolean(config?.apiKey.trim())
         };
       }
     }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ImagePlus, Save } from "lucide-react";
+import { ImagePlus, Save, ShieldCheck, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImageProviderConfigForm } from "@/components/workspace/ImageProviderConfigForm";
 import { WorkspaceDialog } from "@/components/workspace/WorkspaceDialog";
@@ -22,7 +22,9 @@ type ImageAPISettingsDialogProps = {
 export function ImageAPISettingsDialog({ open, onClose }: ImageAPISettingsDialogProps) {
   const savedConfig = useImageProviderStore((state) => state.config);
   const hasSavedProvider = useImageProviderStore((state) => state.isConfigured);
+  const legacyKeyMigrated = useImageProviderStore((state) => state.legacyKeyMigrated);
   const setSavedConfig = useImageProviderStore((state) => state.setConfig);
+  const resetSavedConfig = useImageProviderStore((state) => state.resetConfig);
   const [mounted, setMounted] = useState(false);
   const [draft, setDraft] = useState<ImageProviderConfig>(() => createImageProviderDraft());
   const [error, setError] = useState<string | null>(null);
@@ -38,6 +40,7 @@ export function ImageAPISettingsDialog({ open, onClose }: ImageAPISettingsDialog
   }, []);
 
   const hasSavedConfig = Boolean(hasSavedProvider && savedConfig);
+  const hasRetainedMetadata = Boolean(savedConfig);
   const isDraftSaved = useMemo(
     () =>
       Boolean(
@@ -88,8 +91,18 @@ export function ImageAPISettingsDialog({ open, onClose }: ImageAPISettingsDialog
     setDraft(normalized);
     setError(null);
     setErrorField(null);
-    setSuccessMessage("生图 API 配置已独立保存，不会影响策划 API。首次生成时将验证模型连通性。");
+    setSuccessMessage(
+      "生图 API 配置已保存，首次出图时会验证真实模型能力；不会影响策划 API，刷新后需重新输入 Key。"
+    );
   }, [draft, setSavedConfig]);
+
+  const handleReset = useCallback(() => {
+    resetSavedConfig();
+    setDraft(createImageProviderDraft());
+    setError(null);
+    setErrorField(null);
+    setSuccessMessage("生图 API Key 与已保留的供应商配置均已清除。");
+  }, [resetSavedConfig]);
 
   return (
     <WorkspaceDialog
@@ -108,16 +121,38 @@ export function ImageAPISettingsDialog({ open, onClose }: ImageAPISettingsDialog
         </div>
       ) : (
         <div className="mx-auto max-w-3xl space-y-4">
+          {legacyKeyMigrated ? (
+            <div
+              role="status"
+              className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
+            >
+              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
+              <p className="leading-6">
+                旧版生图 API Key 已从浏览器持久化记录中移除；本次页面打开期间仍可继续使用。
+              </p>
+            </div>
+          ) : null}
           <ImageProviderConfigForm
             config={draft}
             hasSavedConfig={hasSavedConfig}
+            hasRetainedMetadata={hasRetainedMetadata}
             isDraftSaved={isDraftSaved}
             error={error}
             errorField={errorField}
             successMessage={successMessage}
             onChange={handleChange}
           />
-          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleReset}
+              disabled={!hasRetainedMetadata}
+              className="sm:mr-auto"
+            >
+              <Trash2 className="h-4 w-4" />
+              清除生图配置
+            </Button>
             <Button type="button" variant="outline" onClick={onClose}>
               取消
             </Button>

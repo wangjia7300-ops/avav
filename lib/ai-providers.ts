@@ -1,5 +1,8 @@
 import OpenAI from "openai";
-import { ServiceError } from "@/lib/services/errors";
+import {
+  ServiceError,
+  type SafeApiErrorDetails
+} from "@/lib/services/errors";
 import type { AIProviderConfig, AIProviderId } from "@/lib/types";
 
 const DEFAULT_AI_REQUEST_TIMEOUT_MS = 180_000;
@@ -8,6 +11,8 @@ const MAX_AI_REQUEST_TIMEOUT_MS = 300_000;
 const DEFAULT_AI_TRANSPORT_RETRIES = 2;
 const MAX_AI_TRANSPORT_RETRIES = 2;
 const AI_RETRY_BASE_DELAY_MS = 500;
+const MIN_RETRY_BUDGET_RATIO = 0.75;
+const SDK_TIMEOUT_BUDGET_RATIO = 0.9;
 
 // ── Preset definitions ────────────────────────────────────────────
 
@@ -23,6 +28,8 @@ export type ProviderPreset = {
 };
 
 const VOLCENGINE_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+const GEMINI_INTERACTIONS_BASE_URL =
+  "https://generativelanguage.googleapis.com/v1beta";
 const ARK_ENDPOINT_ID_PATTERN = /^ep-[a-z0-9-]+$/i;
 
 export const PRESET_PROVIDERS: ProviderPreset[] = [
@@ -45,6 +52,17 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
     description: "豆包/Seed 系列模型。模型字段支持官方模型名称或火山方舟 ep-... 推理接入点 ID。",
     visionSupport: "depends",
     visionNote: "取决于接入点是否开通视觉理解"
+  },
+  {
+    id: "gemini",
+    name: "Google Gemini",
+    baseURL: GEMINI_INTERACTIONS_BASE_URL,
+    models: ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"],
+    requiresAuth: true,
+    description:
+      "Gemini 原生 Interactions API，支持多图理解与 JSON Schema 结构化输出。",
+    visionSupport: "supported",
+    visionNote: "支持1–9张产品图片理解"
   },
   {
     id: "anthropic",
@@ -97,7 +115,7 @@ export type ChatCompletionParams = {
 };
 
 export type ChatCompletionResponseMetadata = {
-  api: "chat_completions" | "responses" | "anthropic";
+  api: "chat_completions" | "responses" | "anthropic" | "gemini_interactions";
   status?: string;
   finishReason?: string;
   incompleteReason?: string;
@@ -203,13 +221,34 @@ function resolveRequestTimeoutMs(params: ChatCompletionParams) {
   );
 }
 
+function adapterBudgetTimeoutError() {
+  return Object.assign(
+    new Error("The shared adapter request budget was exhausted."),
+    {
+      name: "APIConnectionTimeoutError",
+      code: "ETIMEDOUT"
+    }
+  );
+}
+
+function remainingAdapterTimeoutMs(deadlineAt: number) {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs < MIN_AI_REQUEST_TIMEOUT_MS) {
+    throw adapterBudgetTimeoutError();
+  }
+  return Math.min(MAX_AI_REQUEST_TIMEOUT_MS, remainingMs);
+}
+
 function isProviderTimeout(error: unknown) {
   const candidate = error as { name?: string; code?: string; message?: string };
+  const status = getProviderStatus(error);
   const name = candidate.name?.toLowerCase() ?? "";
   const code = candidate.code?.toLowerCase() ?? "";
   const message = candidate.message?.toLowerCase() ?? "";
 
   return (
+    status === 408 ||
+    status === 504 ||
     name.includes("timeout") ||
     name === "aborterror" ||
     code.includes("timeout") ||
@@ -218,6 +257,79 @@ function isProviderTimeout(error: unknown) {
     message.includes("timeout") ||
     message.includes("aborted")
   );
+}
+
+function isProviderNetworkError(error: unknown) {
+  if (error instanceof ServiceError) return false;
+
+  const candidate = error as { name?: string; code?: string; message?: string };
+  const name = candidate.name?.toLowerCase() ?? "";
+  const code = candidate.code?.toLowerCase() ?? "";
+  const message = candidate.message?.toLowerCase() ?? "";
+
+  return (
+    name.includes("connection") ||
+    [
+      "econnreset",
+      "econnrefused",
+      "eai_again",
+      "enotfound",
+      "enetunreach",
+      "epipe"
+    ].includes(code) ||
+    message.includes("fetch failed") ||
+    message.includes("network error") ||
+    message.includes("socket hang up") ||
+    message.includes("connection reset")
+  );
+}
+
+function hasUpstreamRequestId(error: unknown) {
+  const candidate = error as {
+    request_id?: unknown;
+    requestId?: unknown;
+    requestID?: unknown;
+  };
+  return [
+    candidate.request_id,
+    candidate.requestId,
+    candidate.requestID
+  ].some((value) => typeof value === "string" && value.length > 0);
+}
+
+function providerFailureDiagnostic(input: {
+  error: unknown;
+  startedAt: number;
+  timeoutBudgetMs: number;
+  attempt: number;
+  maxAttempts: number;
+}): SafeApiErrorDetails {
+  const status = getProviderStatus(input.error);
+  const elapsedMs = Math.max(0, Date.now() - input.startedAt);
+  const upstreamStatus =
+    Number.isInteger(status) && Number(status) >= 400 && Number(status) <= 599
+      ? Number(status)
+      : undefined;
+
+  return {
+    failureOrigin:
+      upstreamStatus !== undefined
+        ? "upstream_http"
+        : isProviderTimeout(input.error)
+          ? elapsedMs >= input.timeoutBudgetMs * SDK_TIMEOUT_BUDGET_RATIO
+            ? "sdk_timeout"
+            : "connection_timeout"
+          : isProviderNetworkError(input.error)
+            ? "network"
+            : "unknown",
+    elapsedMs,
+    attempt: input.attempt,
+    maxAttempts: input.maxAttempts,
+    ...(upstreamStatus !== undefined ? { upstreamStatus } : {}),
+    ...(hasUpstreamRequestId(input.error)
+      ? { hasUpstreamRequestId: true }
+      : {})
+  };
 }
 
 function resolveTransportRetries(params: ChatCompletionParams) {
@@ -238,7 +350,7 @@ function resolveTransportRetries(params: ChatCompletionParams) {
 }
 
 function isRetryableTransportError(error: unknown) {
-  if (isProviderTimeout(error)) return false;
+  if (isProviderTimeout(error)) return true;
 
   const status = getProviderStatus(error);
   if (status === 429 || (typeof status === "number" && status >= 500)) {
@@ -247,20 +359,7 @@ function isRetryableTransportError(error: unknown) {
   }
 
   if (error instanceof ServiceError) return false;
-
-  const candidate = error as { name?: string; code?: string; message?: string };
-  const name = candidate.name?.toLowerCase() ?? "";
-  const code = candidate.code?.toLowerCase() ?? "";
-  const message = candidate.message?.toLowerCase() ?? "";
-
-  return (
-    name.includes("connection") ||
-    ["econnreset", "econnrefused", "eai_again", "enotfound", "epipe"].includes(code) ||
-    message.includes("fetch failed") ||
-    message.includes("network error") ||
-    message.includes("socket hang up") ||
-    message.includes("connection reset")
-  );
+  return isProviderNetworkError(error);
 }
 
 function waitForTransportRetry(delayMs: number, signal?: AbortSignal) {
@@ -283,7 +382,11 @@ function waitForTransportRetry(delayMs: number, signal?: AbortSignal) {
   });
 }
 
-function getSafeProviderFailure(error: unknown, providerName: string) {
+function getSafeProviderFailure(
+  error: unknown,
+  providerName: string,
+  diagnostic?: SafeApiErrorDetails
+) {
   const status = getProviderStatus(error);
   const rawMessage = getProviderErrorMessage(error).toLowerCase();
 
@@ -303,10 +406,17 @@ function getSafeProviderFailure(error: unknown, providerName: string) {
   }
 
   if (isProviderTimeout(error)) {
-    return new ServiceError(`${providerName} 响应超时，请稍后重试当前步骤。`, {
-      statusCode: 504,
-      code: "AI_PROVIDER_TIMEOUT"
-    });
+    return new ServiceError(
+      `${providerName} 暂时响应较慢。本次未写入不完整结果，已完成资料仍保留，可重试当前阶段。`,
+      {
+        statusCode: 504,
+        code: "AI_PROVIDER_TIMEOUT",
+        details: {
+          ...diagnostic,
+          retryable: true
+        }
+      }
+    );
   }
 
   if (status === 401) {
@@ -333,7 +443,11 @@ function getSafeProviderFailure(error: unknown, providerName: string) {
   if (status === 429) {
     return new ServiceError(`${providerName} 当前限流或额度不足，请稍后重试。`, {
       statusCode: 429,
-      code: "AI_PROVIDER_RATE_LIMITED"
+      code: "AI_PROVIDER_RATE_LIMITED",
+      details: {
+        ...diagnostic,
+        retryable: true
+      }
     });
   }
 
@@ -356,20 +470,35 @@ function getSafeProviderFailure(error: unknown, providerName: string) {
 
   return new ServiceError(`${providerName} API 调用失败，请稍后重试。`, {
     statusCode: 502,
-    code: "AI_PROVIDER_REQUEST_FAILED"
+    code: "AI_PROVIDER_REQUEST_FAILED",
+    details: {
+      ...diagnostic,
+      // 只有已确认的网络传输异常允许自动提示重试。未知 SDK/
+      // 程序异常保留诊断但不诱导用户再次产生调用费用。供应商明确
+      // 返回 5xx 时允许用户手动重试，但传输层仍不会替用户重放 Ark。
+      retryable:
+        diagnostic?.failureOrigin === "network" ||
+        (diagnostic?.failureOrigin === "upstream_http" &&
+          typeof diagnostic.upstreamStatus === "number" &&
+          diagnostic.upstreamStatus >= 500)
+    }
   });
 }
 
-function normalizeServiceError(error: unknown, providerName: string) {
+function normalizeServiceError(
+  error: unknown,
+  providerName: string,
+  diagnostic?: SafeApiErrorDetails
+) {
   if (error instanceof ServiceError) {
     if (error.code === "ANTHROPIC_REQUEST_FAILED") {
-      return getSafeProviderFailure(error, providerName);
+      return getSafeProviderFailure(error, providerName, diagnostic);
     }
 
     return error;
   }
 
-  return getSafeProviderFailure(error, providerName);
+  return getSafeProviderFailure(error, providerName, diagnostic);
 }
 
 function shouldTryNativeJsonSchema(config: AIProviderConfig) {
@@ -534,6 +663,169 @@ function assertResponsesCompleted(response: unknown) {
   return state;
 }
 
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      Symbol.asyncIterator in value &&
+      typeof (value as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
+  );
+}
+
+function responseStreamEventError(event: {
+  code?: unknown;
+  message?: unknown;
+}) {
+  const code = typeof event.code === "string" ? event.code : "stream_error";
+  const message =
+    typeof event.message === "string" && event.message.trim()
+      ? event.message
+      : "Responses stream failed.";
+  const normalizedCode = code.toLowerCase();
+  const status = normalizedCode.includes("rate_limit")
+    ? 429
+    : normalizedCode.includes("invalid") ||
+        normalizedCode.includes("unsupported")
+      ? 400
+      : normalizedCode.includes("server")
+        ? 502
+        : undefined;
+
+  return Object.assign(new Error(message), {
+    name: "APIError",
+    code,
+    responseStreamEvent: true,
+    ...(status ? { status } : {})
+  });
+}
+
+function isResponseStreamEventFailure(error: unknown) {
+  return (error as { responseStreamEvent?: unknown })
+    .responseStreamEvent === true;
+}
+
+/**
+ * Ark 的长视觉请求改用 Responses SSE。只有收到 completed 终态才会采纳
+ * 文本；流中断、failed 或 incomplete 都继续走既有完整性校验，绝不把
+ * 已收到的半截 JSON 当成成功结果。
+ */
+async function materializeResponsesStream(value: unknown) {
+  if (!isAsyncIterable(value)) {
+    // 兼容不支持 SSE 的 Responses 实现，以及测试用的兼容端点。
+    return value;
+  }
+
+  let terminalResponse: unknown;
+  let streamedText = "";
+  let completed = false;
+  let receivedEvent = false;
+  const startedAt = Date.now();
+
+  try {
+    for await (const rawEvent of value) {
+      receivedEvent = true;
+      const event = rawEvent as {
+        type?: string;
+        delta?: string;
+        text?: string;
+        response?: unknown;
+        code?: unknown;
+        message?: unknown;
+      };
+
+      if (event.type === "response.output_text.delta" && event.delta) {
+        streamedText += event.delta;
+        continue;
+      }
+      if (
+        event.type === "response.output_text.done" &&
+        !streamedText &&
+        event.text
+      ) {
+        streamedText = event.text;
+        continue;
+      }
+      if (event.type === "error") {
+        throw responseStreamEventError(event);
+      }
+      if (
+        event.type === "response.completed" ||
+        event.type === "response.failed" ||
+        event.type === "response.incomplete"
+      ) {
+        terminalResponse = event.response;
+        completed = event.type === "response.completed";
+        // 终态事件已经给出了本次响应的最终状态。继续等待 SSE 连接 EOF
+        // 只会让“成功后关闭连接”的正常抖动被误判成失败。
+        break;
+      }
+    }
+  } catch (error) {
+    if (
+      receivedEvent &&
+      isResponseStreamEventFailure(error) &&
+      !isJsonSchemaUnsupportedError(error)
+    ) {
+      const status = getProviderStatus(error);
+      const responseStatus =
+        Number.isInteger(status) && Number(status) >= 400 && Number(status) <= 599
+          ? Number(status)
+          : undefined;
+      throw new ServiceError("模型供应商流式响应未能完成，本次未写入不完整结果。", {
+        statusCode: responseStatus ?? 502,
+        code: "AI_PROVIDER_STREAM_FAILED",
+        details: {
+          // Responses 的 error 是 HTTP 200 连接中的 SSE 事件，不等于
+          // 供应商真的返回了一个 HTTP 502，避免在诊断里伪造上游状态码。
+          failureOrigin: "stream_event",
+          retryable:
+            responseStatus === 429 ||
+            (responseStatus !== undefined && responseStatus >= 500)
+        }
+      });
+    }
+    // 一旦服务端已开始发送本次响应，自动重放整个视觉请求可能造成
+    // 重复计费。保留显式重试入口，但不在传输层偷偷再发一次。
+    if (
+      receivedEvent &&
+      (isProviderTimeout(error) || isProviderNetworkError(error))
+    ) {
+      throw new ServiceError("模型供应商流式连接在完成前中断，本次未写入不完整结果。", {
+        statusCode: 502,
+        code: "AI_PROVIDER_STREAM_INTERRUPTED",
+        details: {
+          failureOrigin: "connection_timeout",
+          elapsedMs: Math.max(0, Date.now() - startedAt),
+          retryable: true
+        }
+      });
+    }
+    throw error;
+  }
+
+  if (!terminalResponse) {
+    throw new ServiceError("AI 流式响应在完成前中断，请重试。", {
+      statusCode: 502,
+      code: "AI_RESPONSE_INCOMPLETE",
+      details: { normalizedValue: "stream_ended_without_terminal_event" }
+    });
+  }
+
+  if (!completed) {
+    return terminalResponse;
+  }
+
+  const finalText = extractResponsesText(terminalResponse);
+  if (finalText || !streamedText) {
+    return terminalResponse;
+  }
+
+  return {
+    ...(terminalResponse as Record<string, unknown>),
+    output_text: streamedText
+  };
+}
+
 function convertChatMessagesToResponsesInput(messages: ChatCompletionParams["messages"]) {
   return messages.map((message) => {
     if (typeof message.content === "string") {
@@ -558,10 +850,15 @@ function convertChatMessagesToResponsesInput(messages: ChatCompletionParams["mes
             if (part.type === "image_url") {
               const imageUrl =
                 typeof part.image_url === "string" ? part.image_url : part.image_url.url;
+              const detail =
+                typeof part.image_url === "string"
+                  ? "auto"
+                  : part.image_url.detail ?? "auto";
 
               return {
                 type: "input_image",
-                image_url: imageUrl
+                image_url: imageUrl,
+                detail
               };
             }
 
@@ -632,14 +929,17 @@ async function openAICompatibleChat(
   const resolved = resolveCompatibleConfig(config);
   const useNativeJsonSchema = shouldTryNativeJsonSchema(config);
   let nativeJsonSchemaUnsupported = false;
-  const client = new OpenAI({
-    apiKey: config.apiKey,
-    baseURL: resolved.baseURL || undefined,
-    timeout: resolveRequestTimeoutMs(params),
-    maxRetries: 0
-  });
+  // 原生 JSON Schema 和 instruction fallback 属于同一次逻辑请求，
+  // 必须共享一个截止时间，不能各自再获得一份完整 timeout。
+  const adapterDeadlineAt = Date.now() + resolveRequestTimeoutMs(params);
 
   async function request(useNativeSchema: boolean) {
+    const client = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: resolved.baseURL || undefined,
+      timeout: remainingAdapterTimeoutMs(adapterDeadlineAt),
+      maxRetries: 0
+    });
     return client.chat.completions.create(
       {
         model: resolved.model || params.model,
@@ -729,49 +1029,90 @@ async function responsesCompatibleChat(
   const resolved = resolveCompatibleConfig(config);
   const tryNativeJsonSchema = config.providerId === "openai" || config.providerId === "volcengine";
   let nativeJsonSchemaUnsupported = false;
-  const client = new OpenAI({
-    apiKey: config.apiKey,
-    baseURL: resolved.baseURL,
-    timeout: resolveRequestTimeoutMs(params),
-    maxRetries: 0
-  });
+  // Responses 原生结构化输出与指令降级共享同一个截止时间。
+  // 若第一轮已经消耗大部分时间，不再启动一个注定无法完成的降级请求。
+  const adapterDeadlineAt = Date.now() + resolveRequestTimeoutMs(params);
 
   async function request(useNativeSchema: boolean) {
+    const requestTimeoutMs = remainingAdapterTimeoutMs(adapterDeadlineAt);
+    const client = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: resolved.baseURL,
+      timeout: requestTimeoutMs,
+      maxRetries: 0
+    });
     const preparedMessages = useNativeSchema
       ? params.messages
       : withJsonSchemaInstruction(params.messages, params.jsonSchema);
     const { instructions, inputMessages } = splitResponsesMessages(preparedMessages);
+    const useStreaming = config.providerId === "volcengine";
+    const requestController = new AbortController();
+    let deadlineExpired = false;
+    const forwardCallerAbort = () => {
+      requestController.abort(params.signal?.reason);
+    };
+    params.signal?.addEventListener("abort", forwardCallerAbort, {
+      once: true
+    });
+    if (params.signal?.aborted) {
+      forwardCallerAbort();
+    }
+    const deadlineTimer = setTimeout(() => {
+      deadlineExpired = true;
+      requestController.abort();
+    }, requestTimeoutMs);
 
-    return client.responses.create(
-      {
-        model: resolved.model || params.model,
-        ...(instructions ? { instructions } : {}),
-        input: convertChatMessagesToResponsesInput(inputMessages) as never,
-        ...(params.jsonSchema && useNativeSchema
-          ? {
-              text: {
-                format: {
-                  type: "json_schema",
-                  name: params.jsonSchema.name,
-                  strict: params.jsonSchema.strict ?? true,
-                  schema: params.jsonSchema.schema
+    try {
+      const responseOrStream = await client.responses.create(
+        {
+          model: resolved.model || params.model,
+          ...(instructions ? { instructions } : {}),
+          input: convertChatMessagesToResponsesInput(inputMessages) as never,
+          ...(params.jsonSchema && useNativeSchema
+            ? {
+                text: {
+                  format: {
+                    type: "json_schema",
+                    name: params.jsonSchema.name,
+                    strict: params.jsonSchema.strict ?? true,
+                    schema: params.jsonSchema.schema
+                  }
                 }
               }
-            }
-          : {}),
-        ...(params.enableWebSearch && supportsResponsesWebSearch(config)
-          ? {
-              tools: [
-                {
-                  type: "web_search"
-                }
-              ]
-            }
-          : {}),
-        max_output_tokens: params.maxTokens ?? 2000
-      } as never,
-      params.signal ? { signal: params.signal } : undefined
-    );
+            : {}),
+          ...(params.enableWebSearch && supportsResponsesWebSearch(config)
+            ? {
+                tools: [
+                  {
+                    type: "web_search"
+                  }
+                ]
+              }
+            : {}),
+          max_output_tokens: params.maxTokens ?? 2000,
+          ...(useStreaming ? { stream: true } : {})
+        } as never,
+        { signal: requestController.signal }
+      );
+      const response = useStreaming
+        ? await materializeResponsesStream(responseOrStream)
+        : responseOrStream;
+
+      // SDK 的请求 timeout 只覆盖到响应头。若流读取因 deadline abort
+      // 安静结束，仍必须按总预算超时报错，不能把半截输出当成功。
+      if (deadlineExpired) {
+        throw adapterBudgetTimeoutError();
+      }
+      return response;
+    } catch (error) {
+      if (deadlineExpired && !params.signal?.aborted) {
+        throw adapterBudgetTimeoutError();
+      }
+      throw error;
+    } finally {
+      clearTimeout(deadlineTimer);
+      params.signal?.removeEventListener("abort", forwardCallerAbort);
+    }
   }
 
   let response: Awaited<ReturnType<typeof request>>;
@@ -1054,8 +1395,22 @@ export async function createChatCompletion(
   config: AIProviderConfig,
   params: ChatCompletionParams
 ): Promise<ChatCompletionResult> {
-  const maxRetries = resolveTransportRetries(params);
+  const configuredMaxRetries = resolveTransportRetries(params);
+  // Ark 长视觉请求可能已经到达计费侧，但当前接口没有可用的幂等键。
+  // 因此即使首个 SSE 事件尚未到达，也不在传输层隐式重放付费请求；
+  // 失败后由用户通过明确的“重试当前阶段”再次发起。
+  const maxRetries =
+    config.providerId === "volcengine" || config.providerId === "gemini"
+      ? 0
+      : configuredMaxRetries;
+  // timeoutMs 是整次传输（含重试）的总预算，而不是每次尝试都可重复
+  // 消耗的时长。其他供应商发生瞬时错误时可以在剩余预算内重试，
+  // 同时不会把多次完整等待叠加到路由上限之外。
+  const startedAt = Date.now();
+  const totalBudgetMs = resolveRequestTimeoutMs(params);
+  const deadlineAt = startedAt + totalBudgetMs;
   let lastError: unknown;
+  let attemptsUsed = 0;
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     if (params.signal?.aborted) {
@@ -1065,29 +1420,63 @@ export async function createChatCompletion(
       });
     }
 
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs < MIN_AI_REQUEST_TIMEOUT_MS) {
+      break;
+    }
+    const attemptParams = {
+      ...params,
+      // 首轮始终拥有完整剩余预算。若供应商快速返回瞬时错误，
+      // 后续尝试才使用扣除已消耗时间后的余额；绝不为预留一次
+      // 可能不会发生的重试而提前截断重型多图请求。
+      timeoutMs: Math.min(MAX_AI_REQUEST_TIMEOUT_MS, remainingMs)
+    };
+
     try {
+      attemptsUsed = attempt + 1;
       if (config.providerId === "anthropic") {
-        return await anthropicChat(config, params);
+        return await anthropicChat(config, attemptParams);
+      }
+
+      if (config.providerId === "gemini") {
+        const { geminiInteractionsChat } = await import(
+          "@/lib/gemini-provider"
+        );
+        return await geminiInteractionsChat(config, attemptParams);
       }
 
       if (resolveCompatibleConfig(config).useResponsesAPI) {
-        return await responsesCompatibleChat(config, params);
+        return await responsesCompatibleChat(config, attemptParams);
       }
 
-      return await openAICompatibleChat(config, params);
+      return await openAICompatibleChat(config, attemptParams);
     } catch (error) {
       lastError = error;
       if (
+        params.signal?.aborted ||
         attempt >= maxRetries ||
         !isRetryableTransportError(error)
       ) {
         break;
       }
 
-      await waitForTransportRetry(
-        AI_RETRY_BASE_DELAY_MS * 2 ** attempt,
-        params.signal
+      const delayMs = AI_RETRY_BASE_DELAY_MS * 2 ** attempt;
+      const retryBudgetAfterDelay = deadlineAt - Date.now() - delayMs;
+      const meaningfulRetryBudget = Math.max(
+        MIN_AI_REQUEST_TIMEOUT_MS,
+        Math.round(totalBudgetMs * MIN_RETRY_BUDGET_RATIO)
       );
+      if (retryBudgetAfterDelay < meaningfulRetryBudget) {
+        break;
+      }
+      try {
+        await waitForTransportRetry(delayMs, params.signal);
+      } catch (error) {
+        if (params.signal?.aborted) {
+          break;
+        }
+        throw error;
+      }
     }
   }
 
@@ -1102,7 +1491,16 @@ export async function createChatCompletion(
     lastError,
     config.displayName ??
       PRESET_PROVIDERS.find((preset) => preset.id === config.providerId)?.name ??
-      config.providerId
+      config.providerId,
+    providerFailureDiagnostic({
+      error: lastError,
+      startedAt,
+      timeoutBudgetMs: totalBudgetMs,
+      attempt: attemptsUsed,
+      // 只展示实际启动过的尝试次数，避免真实 SDK 耗尽首轮预算后
+      // 仍向用户显示“1/2”这种并未发生第二次调用的误导信息。
+      maxAttempts: Math.max(1, attemptsUsed)
+    })
   );
 }
 
@@ -1122,7 +1520,18 @@ export function getEnvProviderConfig(): AIProviderConfig | null {
     };
   }
 
-  const apiKey = process.env.OPENAI_API_KEY;
+  const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
+  if (geminiApiKey) {
+    return {
+      providerId: "gemini",
+      apiKey: geminiApiKey,
+      baseURL: GEMINI_INTERACTIONS_BASE_URL,
+      model: process.env.GEMINI_MODEL?.trim() || "gemini-3.6-flash",
+      displayName: "Google Gemini（服务端）"
+    };
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) return null;
 
   return {

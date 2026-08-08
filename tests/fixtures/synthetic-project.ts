@@ -7,7 +7,7 @@ import type {
   VisualAuditDimension
 } from "@/lib/types";
 import { EMPTY_BRIEF } from "@/lib/skill-suite/defaults";
-import { compileScreenImagePrompt } from "@/lib/skill-suite/prompts";
+import { compileScreenImagePrompt } from "@/lib/skill-suite/jimeng-prompt-translator";
 import { buildScreenContracts } from "@/lib/skill-suite/screen-contracts";
 
 const now = "2026-07-24T08:00:00.000Z";
@@ -379,10 +379,10 @@ function buildExecution(screen: DetailScreen): ScreenExecution {
   const draft: Omit<ScreenExecution, "englishPrompt"> = {
     screenId: screen.id,
     copyFinal: screen.copy,
-    visualInstruction: `${screen.scene}。采用${screen.shot}，围绕“${screen.role}”建立单一画面任务。严格保持参考图中的原始产品配色与主体结构。为标题、副标题、正文和要点预留清晰层级与安全区，文字不得遮挡产品。`,
-    visualPrompt: `A vertical 9:16 premium e-commerce product visual featuring the exact grey-white test storage pouch with test-blue and dark grey accents from the reference images. Use the planned scene and camera direction for this screen, preserve the front multi-pocket construction, zipper positions, shoulder straps and color blocking. Clean editorial lighting, realistic materials, one clear visual task, generous negative space, and a reserved approved-copy block with headline, subheadline, body and key-point hierarchy. Keep the typography area away from important product details.`,
+    visualInstruction: "采用真实商业摄影质感和柔和定向光，围绕本屏的单一购买任务组织画面。严格保持参考图中的原始产品配色与主体结构，为标题、副标题、正文和要点预留清晰层级与安全区，文字不得遮挡产品。",
+    visualPrompt: "9:16竖版电商详情页，严格保持参考图产品的主体结构、部件位置和原始外观。采用本屏既定场景与机位，使用干净商业光线和真实材质，只表达一个画面任务，并为中文标题、副标题、正文和要点预留清楚层级。",
     negativePrompt:
-      "wrong pouch structure, changed zipper count, changed colors, extra pockets, distorted straps, misspelled Chinese, missing characters, duplicated text, paraphrased copy, fake certification, extra claims, watermark, low resolution",
+      "不改变包体结构、拉链数量、肩带和配色，不新增口袋、认证、额外卖点或水印",
     geo: {
       query: `这款收纳包的${screen.primarySellingPoint}有什么可见特点？`,
       answer: `从图片可确认：${screen.evidenceIds
@@ -498,7 +498,6 @@ export function createSampleProject(): DetailPageProject {
         id: "synthetic-fixture",
         name: "synthetic-fixture.png",
         dataUrl: "data:image/png;base64,iVBORw0KGgo=",
-        kind: "product",
         size: 0
       }
     ],
@@ -561,6 +560,41 @@ export function createSampleProject(): DetailPageProject {
     },
     executions,
     qa: {
+      status: "prompt_complete",
+      coverage: {
+        expectedScreens: 15,
+        planScreens: 15,
+        executionScreens: 15,
+        generatedImageScreens: 0,
+        pixelVerifiedScreens: 0,
+        missingPlanIds: [],
+        missingExecutionIds: [],
+        missingImageIds: Array.from(
+          { length: 15 },
+          (_, index) => `screen-${String(index + 1).padStart(2, "0")}`
+        ),
+        unexpectedPlanIds: [],
+        unexpectedExecutionIds: []
+      },
+      checks: {
+        rules: "evaluated",
+        semantic: "evaluated",
+        render: "not_evaluated",
+        pixel: "not_evaluated"
+      },
+      notEvaluated: [
+        {
+          check: "render",
+          status: "not_evaluated",
+          reason: "测试夹具未绑定真实成图。"
+        },
+        {
+          check: "pixel",
+          status: "not_evaluated",
+          reason: "测试夹具未执行像素质检。"
+        }
+      ],
+      publishDecision: "review_required",
       findings: qaFindings,
       summary: "测试夹具无发布阻断；甲方普通民用基础资料可用于文案，另有4项制作与留档建议。",
       source: "rules+model",

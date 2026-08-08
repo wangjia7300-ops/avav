@@ -1,6 +1,6 @@
 import type { DetailScreen } from "@/lib/types";
 
-export type PlanRepairScope = "foundation" | "screen" | "cross-screen";
+type PlanRepairScope = "foundation" | "screen" | "cross-screen";
 
 export type PlanRepairField =
   | "role"
@@ -28,21 +28,6 @@ export type PlanRepairIssue = {
   immutableEvidenceIds?: string[];
   allowedRepairFields: PlanRepairField[];
 };
-
-const MUTABLE_FIELDS: readonly PlanRepairField[] = [
-  "role",
-  "conversionTask",
-  "primarySellingPoint",
-  "proofMethod",
-  "copy.headline",
-  "copy.subheadline",
-  "copy.body",
-  "copy.keyPoints",
-  "scene",
-  "shot",
-  "composition",
-  "transition"
-];
 
 export class PlanRepairContractError extends Error {
   constructor(
@@ -82,7 +67,7 @@ export function selectPlanRepairTargetIds(
   const explicit = stableUnique(
     issues.flatMap((issue) => issue.screenIds).filter((id) => knownIds.has(id))
   );
-  return explicit.length > 0 ? explicit : screens.map((screen) => screen.id);
+  return explicit;
 }
 
 export function allowedRepairFieldsByScreen(
@@ -99,7 +84,7 @@ export function allowedRepairFieldsByScreen(
       ) as PlanRepairField[];
       return [
         screenId,
-        matchingIssues.length > 0 ? fields : [...MUTABLE_FIELDS]
+        matchingIssues.length > 0 ? fields : []
       ] as const;
     })
   );
@@ -139,6 +124,292 @@ function changedMutableFields(
 
 function isDetailScreen(value: unknown): value is DetailScreen {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && Boolean(value.trim());
+}
+
+function repairFieldMaxLength(field: PlanRepairField) {
+  switch (field) {
+    case "copy.headline":
+      return 20;
+    case "copy.subheadline":
+      return 40;
+    case "copy.body":
+      return 100;
+    case "role":
+      return 30;
+    case "conversionTask":
+    case "primarySellingPoint":
+    case "shot":
+      return 80;
+    case "proofMethod":
+    case "scene":
+    case "transition":
+      return 160;
+    case "composition":
+      return 240;
+    case "copy.keyPoints":
+      return 30;
+  }
+}
+
+function assertSafeRepairText(
+  field: PlanRepairField,
+  value: string,
+  maxLength = repairFieldMaxLength(field)
+) {
+  if (Array.from(value).length > maxLength) {
+    throw new PlanRepairContractError(
+      `${field} 长度超过${maxLength}个字符。`,
+      "PLAN_REPAIR_INVALID"
+    );
+  }
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) {
+    throw new PlanRepairContractError(
+      `${field} 含不可见控制字符。`,
+      "PLAN_REPAIR_INVALID"
+    );
+  }
+  if (/<\/?[a-z][^>]*>/iu.test(value)) {
+    throw new PlanRepairContractError(
+      `${field} 不得包含 HTML。`,
+      "PLAN_REPAIR_INVALID"
+    );
+  }
+}
+
+export function buildPlanningRepairPatchSchema(
+  targetId: string,
+  allowedFields: readonly PlanRepairField[]
+) {
+  // OpenAI-compatible strict schemas require every declared property to be
+  // listed in `required`. Nullable placeholders let the model leave an
+  // authorized field unchanged without weakening additionalProperties=false.
+  const sortedAllowedFields = stableUnique(allowedFields) as PlanRepairField[];
+  const fieldSchemas = Object.fromEntries(
+    sortedAllowedFields.map((field) => [
+      field,
+      field === "copy.keyPoints"
+        ? {
+            anyOf: [
+              {
+                type: "array",
+                minItems: 1,
+                maxItems: 3,
+                items: { type: "string", minLength: 1, maxLength: 30 }
+              },
+              { type: "null" }
+            ]
+          }
+        : {
+            anyOf: [
+              {
+                type: "string",
+                minLength: 1,
+                maxLength: repairFieldMaxLength(field)
+              },
+              { type: "null" }
+            ]
+          }
+    ])
+  );
+
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["screenId", "changes"],
+    properties: {
+      screenId: { type: "string", const: targetId },
+      changes: {
+        type: "object",
+        additionalProperties: false,
+        required: sortedAllowedFields,
+        properties: fieldSchemas
+      }
+    }
+  };
+}
+
+function applyRepairField(
+  screen: DetailScreen,
+  field: PlanRepairField,
+  value: unknown
+) {
+  if (field === "copy.keyPoints") {
+    if (
+      !Array.isArray(value) ||
+      value.length < 1 ||
+      value.length > 3 ||
+      !value.every(isNonEmptyString)
+    ) {
+      throw new PlanRepairContractError(
+        `${field} 必须是1到3条非空短要点。`,
+        "PLAN_REPAIR_INVALID"
+      );
+    }
+    value.forEach((item) =>
+      assertSafeRepairText("copy.keyPoints", item, 30)
+    );
+    screen.copy.keyPoints = [...value];
+    return;
+  }
+
+  if (!isNonEmptyString(value)) {
+    throw new PlanRepairContractError(
+      `${field} 必须是非空文本。`,
+      "PLAN_REPAIR_INVALID"
+    );
+  }
+  assertSafeRepairText(field, value);
+
+  switch (field) {
+    case "role":
+      screen.role = value;
+      break;
+    case "conversionTask":
+      screen.conversionTask = value;
+      break;
+    case "primarySellingPoint":
+      screen.primarySellingPoint = value;
+      break;
+    case "proofMethod":
+      screen.proofMethod = value;
+      break;
+    case "copy.headline":
+      screen.copy.headline = value;
+      break;
+    case "copy.subheadline":
+      screen.copy.subheadline = value;
+      break;
+    case "copy.body":
+      screen.copy.body = value;
+      break;
+    case "scene":
+      screen.scene = value;
+      break;
+    case "shot":
+      screen.shot = value;
+      break;
+    case "composition":
+      screen.composition = value;
+      break;
+    case "transition":
+      screen.transition = value;
+      break;
+  }
+}
+
+/**
+ * 单屏修复只接受授权字段 patch。模型不再回传 id 以外的任务
+ * 主体、证据或 claimScope，因此这些不可变字段从数据结构上
+ * 就不存在被误改的通道。
+ */
+export function parsePlanningRepairPatchPayload(input: {
+  payload: unknown;
+  targetId: string;
+  originalScreens: readonly DetailScreen[];
+  issues: readonly PlanRepairIssue[];
+}) {
+  if (!isRecord(input.payload)) {
+    throw new PlanRepairContractError(
+      "策划修复 patch 必须是 JSON 对象。",
+      "PLAN_REPAIR_INVALID"
+    );
+  }
+  const rootKeys = Object.keys(input.payload);
+  const illegalRootKeys = rootKeys.filter(
+    (key) => key !== "screenId" && key !== "changes"
+  );
+  if (
+    input.payload.screenId !== input.targetId ||
+    illegalRootKeys.length > 0 ||
+    !isRecord(input.payload.changes)
+  ) {
+    throw new PlanRepairContractError(
+      "策划修复 patch 越界、串屏或结构无效。",
+      "PLAN_REPAIR_INVALID",
+      [
+        `目标：${input.targetId}`,
+        `实际：${String(input.payload.screenId ?? "空")}`,
+        `越界根字段：${illegalRootKeys.join("、") || "无"}`
+      ]
+    );
+  }
+
+  const original = input.originalScreens.find(
+    (screen) => screen.id === input.targetId
+  );
+  if (!original) {
+    throw new PlanRepairContractError(
+      `${input.targetId} 不属于被拒策划。`,
+      "PLAN_REPAIR_INVALID"
+    );
+  }
+  const allowed = new Set(
+    allowedRepairFieldsByScreen(input.issues, [input.targetId]).get(
+      input.targetId
+    ) ?? []
+  );
+  if (allowed.size === 0) {
+    throw new PlanRepairContractError(
+      `${input.targetId} 没有可执行的字段修复授权。`,
+      "PLAN_REPAIR_INVALID"
+    );
+  }
+
+  const rawChangeEntries = Object.entries(input.payload.changes);
+  if (rawChangeEntries.length === 0) {
+    throw new PlanRepairContractError(
+      `${input.targetId} 返回了空修复 patch。`,
+      "PLAN_REPAIR_INVALID"
+    );
+  }
+  const illegalFields = rawChangeEntries
+    .map(([field]) => field)
+    .filter((field) => !allowed.has(field as PlanRepairField));
+  if (illegalFields.length > 0) {
+    throw new PlanRepairContractError(
+      `${input.targetId} 修改了未授权字段。`,
+      "PLAN_REPAIR_CONTRACT_MUTATION",
+      illegalFields
+    );
+  }
+
+  // Strict-schema callers return every authorized key. `null` means that key
+  // is intentionally unchanged; at least one non-null change is still
+  // required. Legacy/non-schema providers may omit untouched keys.
+  const changeEntries = rawChangeEntries.filter(([, value]) => value !== null);
+  if (changeEntries.length === 0) {
+    throw new PlanRepairContractError(
+      `${input.targetId} 返回了空修复 patch。`,
+      "PLAN_REPAIR_INVALID"
+    );
+  }
+
+  const repaired: DetailScreen = {
+    ...original,
+    copy: {
+      ...original.copy,
+      keyPoints: [...original.copy.keyPoints]
+    }
+  };
+  changeEntries.forEach(([field, value]) => {
+    applyRepairField(repaired, field as PlanRepairField, value);
+  });
+  if (changedMutableFields(original, repaired).length === 0) {
+    throw new PlanRepairContractError(
+      `${input.targetId} 的修复 patch 没有产生任何实际变化。`,
+      "PLAN_REPAIR_INVALID"
+    );
+  }
+
+  return repaired;
 }
 
 export function parsePlanningRepairPayload(input: {
@@ -221,7 +492,7 @@ export function parsePlanningRepairPayload(input: {
       );
     }
 
-    const allowed = new Set(allowedById.get(screen.id) ?? MUTABLE_FIELDS);
+    const allowed = new Set(allowedById.get(screen.id) ?? []);
     const illegalChanges = changedMutableFields(original, screen).filter(
       (field) => !allowed.has(field)
     );

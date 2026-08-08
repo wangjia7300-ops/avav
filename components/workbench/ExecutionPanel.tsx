@@ -12,10 +12,16 @@ import {
 import type {
   DetailPlan,
   ExecutionMode,
+  ExecutionRunStatus,
   GeneratedImageAsset,
   ProjectAsset,
   ScreenExecution
 } from "@/lib/types";
+import {
+  executionIdsToRun,
+  isExecutionCurrent,
+  selectCurrentExecutions
+} from "@/lib/skill-suite/workflow";
 
 const modes: Array<{ id: ExecutionMode; label: string }> = [
   { id: "A", label: "文案定稿" },
@@ -28,6 +34,7 @@ type ExecutionPanelProps = {
   plan: DetailPlan | null;
   assets: ProjectAsset[];
   executions: Record<string, ScreenExecution>;
+  executionStatuses: Record<string, ExecutionRunStatus>;
   selectedScreenId: string;
   mode: ExecutionMode;
   generatedImages: Record<string, GeneratedImageAsset>;
@@ -43,6 +50,28 @@ type ExecutionPanelProps = {
 
 function copyText(value: string) {
   return navigator.clipboard.writeText(value);
+}
+
+function executionStatusMarker(
+  status: ExecutionRunStatus | undefined,
+  current: boolean
+) {
+  if (current) {
+    return { className: "is-succeeded", label: "当前版本已生成" };
+  }
+  if (!status || status === "not_started") return null;
+  const labels: Partial<Record<ExecutionRunStatus, string>> = {
+    queued: "等待生成",
+    running: "正在生成",
+    failed_retryable: "生成失败，可重试",
+    blocked: "存在阻断问题",
+    stale: "结果已失效",
+    cancelled: "生成已取消"
+  };
+  return {
+    className: `is-${status.replace(/_/g, "-")}`,
+    label: labels[status] ?? status
+  };
 }
 
 function exportMarkdown(plan: DetailPlan, executions: Record<string, ScreenExecution>) {
@@ -66,10 +95,10 @@ function exportMarkdown(plan: DetailPlan, executions: Record<string, ScreenExecu
             ].join("\n")
           : "尚未生成",
         "",
-        "### English Prompt",
+        "### 即梦生图指令（实际发送）",
         execution?.englishPrompt ?? "尚未生成",
         "",
-        "### Negative Prompt",
+        "### 即梦约束条件",
         execution?.negativePrompt ?? "尚未生成",
         "",
         `> ${execution?.aiLabel ?? "尚未生成"}`
@@ -91,6 +120,7 @@ export function ExecutionPanel({
   plan,
   assets,
   executions,
+  executionStatuses,
   selectedScreenId,
   mode,
   generatedImages,
@@ -107,7 +137,7 @@ export function ExecutionPanel({
     return (
       <section className="stage-empty">
         <span className="stage-empty-icon"><MagicWand size={30} /></span>
-        <p className="eyebrow">技能 03 · 详情页执行</p>
+        <p className="eyebrow">阶段 03 · 详情页执行</p>
         <h1>请先生成15屏策划</h1>
         <p>执行模块只翻译已经确认的每屏任务，不重新发明卖点或重复整份规范。</p>
       </section>
@@ -116,16 +146,49 @@ export function ExecutionPanel({
 
   const selectedScreen =
     plan.screens.find((screen) => screen.id === selectedScreenId) ?? plan.screens[0];
-  const execution = executions[selectedScreen.id];
-  const generatedImage = generatedImages[selectedScreen.id];
-  const completed = Object.keys(executions).length;
+  const storedExecution = executions[selectedScreen.id];
+  const executionIsCurrent = isExecutionCurrent(
+    selectedScreen.id,
+    executions,
+    executionStatuses
+  );
+  const execution = executionIsCurrent ? storedExecution : undefined;
+  const generatedImage = executionIsCurrent
+    ? generatedImages[selectedScreen.id]
+    : undefined;
+  const pendingIds = executionIdsToRun(plan, executions, executionStatuses);
+  const currentExecutions = selectCurrentExecutions(
+    executions,
+    executionStatuses
+  );
+  const completed = plan.screens.filter((screen) =>
+    Boolean(currentExecutions[screen.id])
+  ).length;
+  const blocked = plan.screens.filter(
+    (screen) => executionStatuses[screen.id] === "blocked"
+  ).length;
+  const firstBlockedId = plan.screens.find(
+    (screen) => executionStatuses[screen.id] === "blocked"
+  )?.id;
+  const batchActionLabel = running
+    ? workLabel || "生成中…"
+    : completed === 15
+      ? "15屏均已完成"
+      : pendingIds.length
+        ? blocked
+          ? `本次页面内续跑 ${pendingIds.length} 屏（另有 ${blocked} 屏阻断）`
+          : `本次页面内续跑剩余 ${pendingIds.length} 屏`
+        : blocked
+          ? `定位首个阻断屏（共 ${blocked} 屏）`
+          : "等待运行中页面完成";
+  const selectedRunStatus = executionStatuses[selectedScreen.id];
   const heroAsset = assets[0]?.dataUrl;
 
   return (
     <section className="execution-workspace">
       <div className="execution-toolbar">
         <div>
-          <p className="eyebrow">技能 03 · 详情页执行</p>
+          <p className="eyebrow">阶段 03 · 详情页执行</p>
           <h1>屏幕 {String(selectedScreen.index).padStart(2, "0")} / 15</h1>
         </div>
         <div className="execution-progress">
@@ -135,7 +198,7 @@ export function ExecutionPanel({
         <button
           type="button"
           className="secondary-action compact"
-          onClick={() => exportMarkdown(plan, executions)}
+          onClick={() => exportMarkdown(plan, currentExecutions)}
           disabled={!completed}
         >
           <DownloadSimple size={17} />
@@ -144,36 +207,61 @@ export function ExecutionPanel({
         <button
           type="button"
           className="primary-action compact"
-          onClick={onGenerateAll}
-          disabled={running}
+          onClick={
+            pendingIds.length
+              ? onGenerateAll
+              : firstBlockedId
+                ? () => onSelectScreen(firstBlockedId)
+                : onGenerateAll
+          }
+          disabled={running || (pendingIds.length === 0 && !firstBlockedId)}
         >
           <Sparkle size={17} />
-          {running ? workLabel || "生成中…" : "批量生成15屏"}
+          {batchActionLabel}
         </button>
       </div>
 
       <div className="execution-body">
         <nav className="screen-minimap" aria-label="15屏导航">
-          {plan.screens.map((screen) => (
-            <button
-              key={screen.id}
-              type="button"
-              className={screen.id === selectedScreen.id ? "is-active" : ""}
-              onClick={() => onSelectScreen(screen.id)}
-            >
-              <span>{String(screen.index).padStart(2, "0")}</span>
-              <small>{screen.role}</small>
-              {executions[screen.id] ? <i aria-label="已生成" /> : null}
-            </button>
-          ))}
+          {plan.screens.map((screen) => {
+            const current = isExecutionCurrent(
+              screen.id,
+              executions,
+              executionStatuses
+            );
+            const marker = executionStatusMarker(
+              executionStatuses[screen.id],
+              current
+            );
+            return (
+              <button
+                key={screen.id}
+                type="button"
+                className={screen.id === selectedScreen.id ? "is-active" : ""}
+                onClick={() => onSelectScreen(screen.id)}
+              >
+                <span>{String(screen.index).padStart(2, "0")}</span>
+                <small>{screen.role}</small>
+                {marker ? (
+                  <i className={marker.className} aria-label={marker.label} />
+                ) : null}
+              </button>
+            );
+          })}
         </nav>
 
         <div className="preview-column">
           <div className="preview-toolbar">
             <span>9:16 竖版</span>
-            <span>1440 × 2560</span>
+            <span>
+              {generatedImage?.width && generatedImage?.height
+                ? `${generatedImage.width} × ${generatedImage.height}`
+                : "目标 1440 × 2560"}
+            </span>
           </div>
-          <div className="detail-preview">
+          <div
+            className={`detail-preview${generatedImage ? " is-generated" : ""}`}
+          >
             {generatedImage ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img src={generatedImage.imageUrl} alt={`${selectedScreen.copy.headline} 生成图`} />
@@ -183,21 +271,25 @@ export function ExecutionPanel({
             ) : (
               <div className="preview-placeholder"><ImageSquare size={32} /></div>
             )}
-            <div className="preview-copy">
-              <small>{selectedScreen.role}</small>
-              <h2>{execution?.copyFinal.headline ?? selectedScreen.copy.headline}</h2>
-              <p className="preview-subheadline">
-                {execution?.copyFinal.subheadline ?? selectedScreen.copy.subheadline}
-              </p>
-              <p className="preview-body">
-                {execution?.copyFinal.body ?? selectedScreen.copy.body}
-              </p>
-            </div>
-            <div className="preview-evidence">
-              {(execution?.copyFinal.keyPoints ?? selectedScreen.copy.keyPoints)
-                .slice(0, 3)
-                .map((item) => <span key={item}>{item}</span>)}
-            </div>
+            {!generatedImage ? (
+              <>
+                <div className="preview-copy">
+                  <small>{selectedScreen.role}</small>
+                  <h2>{execution?.copyFinal.headline ?? selectedScreen.copy.headline}</h2>
+                  <p className="preview-subheadline">
+                    {execution?.copyFinal.subheadline ?? selectedScreen.copy.subheadline}
+                  </p>
+                  <p className="preview-body">
+                    {execution?.copyFinal.body ?? selectedScreen.copy.body}
+                  </p>
+                </div>
+                <div className="preview-evidence">
+                  {(execution?.copyFinal.keyPoints ?? selectedScreen.copy.keyPoints)
+                    .slice(0, 3)
+                    .map((item) => <span key={item}>{item}</span>)}
+                </div>
+              </>
+            ) : null}
           </div>
           <button
             type="button"
@@ -208,7 +300,11 @@ export function ExecutionPanel({
             <ImageSquare size={18} />
             {generatedImage ? "重新生图" : "携带参考图生成完整画面"}
           </button>
-          <p className="preview-note">生图会携带本屏定稿文案；出图后仍需复核中文错字、漏字和重复文字。</p>
+          <p className="preview-note">
+            {generatedImage
+              ? "当前预览为供应商返回并经服务端校验后的原始成图，未再叠加页面文案；请与右侧定稿逐字复核。"
+              : "生图会携带本屏定稿文案；出图后仍需复核中文错字、漏字和重复文字。"}
+          </p>
         </div>
 
         <div className="deliverable-column">
@@ -231,15 +327,31 @@ export function ExecutionPanel({
           {!execution ? (
             <div className="execution-empty">
               <FileCode size={28} />
-              <h2>本屏尚未生成执行交付</h2>
-              <p>将基于本屏任务和证据库生成 A / B / D / E 四类成果，不复制其他屏内容。</p>
+              <h2>
+                {selectedRunStatus === "failed_retryable"
+                  ? "本屏上次生成失败，可安全重试"
+                  : selectedRunStatus === "stale"
+                    ? "本屏交付已失效，需要重新生成"
+                    : selectedRunStatus === "blocked"
+                      ? "本屏存在阻断问题"
+                      : selectedRunStatus === "cancelled"
+                        ? "本屏上次生成已取消，可重新生成"
+                    : "本屏尚未生成执行交付"}
+              </h2>
+              <p>
+                已成功的其他屏会原样保留；本次只处理当前缺失、失败或已失效屏。
+              </p>
               <button
                 type="button"
                 className="primary-action"
                 onClick={onGenerateScreen}
-                disabled={running}
+                disabled={running || selectedRunStatus === "blocked"}
               >
-                {running ? "正在生成本屏…" : "生成本屏交付"}
+                {running
+                  ? "正在生成本屏…"
+                  : selectedRunStatus === "blocked"
+                    ? "先处理阻断原因"
+                    : "生成或重试本屏"}
               </button>
             </div>
           ) : (
@@ -257,9 +369,9 @@ export function ExecutionPanel({
               ) : null}
               {mode === "B" ? (
                 <>
-                  <DeliverableBlock title="本屏中文视觉指令" value={execution.visualInstruction} />
-                  <DeliverableBlock title="English Prompt" value={execution.englishPrompt} />
-                  <DeliverableBlock title="Negative Prompt" value={execution.negativePrompt} tone="warning" />
+                  <DeliverableBlock title="本屏即梦视觉草稿" value={execution.visualInstruction} />
+                  <DeliverableBlock title="即梦生图指令（实际发送）" value={execution.englishPrompt} />
+                  <DeliverableBlock title="即梦约束条件" value={execution.negativePrompt} tone="warning" />
                 </>
               ) : null}
               {mode === "D" ? (

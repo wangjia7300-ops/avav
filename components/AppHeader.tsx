@@ -14,17 +14,14 @@ import { APISettingsDialog } from "@/components/workspace/APISettingsDialog";
 import { ImageAPISettingsDialog } from "@/components/workspace/ImageAPISettingsDialog";
 import { cn } from "@/lib/utils";
 import type { WorkflowStage } from "@/lib/types";
+import { WORKFLOW_STEPS } from "@/lib/skill-suite/workflow";
 
-const stages: Array<{
-  id: WorkflowStage;
-  label: string;
-  icon: typeof MagnifyingGlass;
-}> = [
-  { id: "research", label: "图研", icon: MagnifyingGlass },
-  { id: "planning", label: "策划", icon: FileText },
-  { id: "execution", label: "执行", icon: PaintBrush },
-  { id: "qa", label: "质检", icon: ShieldCheck }
-];
+const stageIcons: Record<WorkflowStage, typeof MagnifyingGlass> = {
+  research: MagnifyingGlass,
+  planning: FileText,
+  execution: PaintBrush,
+  qa: ShieldCheck
+};
 
 type AppHeaderProps = {
   stage: WorkflowStage;
@@ -56,13 +53,13 @@ export function AppHeader({
           </button>
           <div>
             <p className="brand-title">电商详情页工作台</p>
-            <p className="brand-subtitle">四技能生产系统</p>
+            <p className="brand-subtitle">四阶段生产系统</p>
           </div>
         </div>
 
         <nav className="workflow-nav" aria-label="详情页生产流程">
-          {stages.map((item, index) => {
-            const Icon = item.icon;
+          {WORKFLOW_STEPS.map((item, index) => {
+            const Icon = stageIcons[item.id];
             const completed = completedStages.includes(item.id);
             const active = stage === item.id;
             return (

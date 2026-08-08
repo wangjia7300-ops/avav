@@ -87,6 +87,9 @@ describe("deterministic copy quality", () => {
     const report = checkCopyQuality([original]);
 
     expect(report.issues.some((issue) => issue.code === "advertising_tone")).toBe(true);
+    expect(
+      report.issues.find((issue) => issue.code === "advertising_tone")
+    ).toMatchObject({ severity: "error" });
     expect(report.issues.some((issue) => issue.code === "manual_tone")).toBe(true);
     expect(report.issues.some((issue) => issue.code === "stereotype_label")).toBe(true);
     expect(report.issues.every((issue) => issue.preserveClientFacts)).toBe(true);
@@ -218,6 +221,28 @@ describe("deterministic copy quality", () => {
       path: "screens[0].copy.body",
       severity: "error"
     });
+  });
+
+  it("finds truncation in headlines, subtitles and key points instead of only body copy", () => {
+    const report = checkCopyQuality([
+      makeScreen("screen-01", 1, {
+        headline: "每天出门更",
+        subheadline: "光滑釉面与",
+        body: "吃完饭轻轻清洗，日常好打理。",
+        keyPoints: ["白色碗身与"]
+      })
+    ]);
+    const fragmentPaths = report.issues
+      .filter((issue) => issue.code === "sentence_fragment")
+      .map((issue) => issue.path);
+
+    expect(fragmentPaths).toEqual(
+      expect.arrayContaining([
+        "screens[0].copy.headline",
+        "screens[0].copy.subheadline",
+        "screens[0].copy.keyPoints[0]"
+      ])
+    );
   });
 
   it("does not mistake 核对 for a dangling connector", () => {

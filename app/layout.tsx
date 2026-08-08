@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "电商详情页工作台",
-  description: "图研、策划、执行、质检四技能驱动的15屏电商详情页生产系统。"
+  description: "图研、策划、执行、质检四阶段驱动的15屏电商详情页生产系统。"
 };
 
 export default function RootLayout({

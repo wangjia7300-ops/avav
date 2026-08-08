@@ -1,8 +1,8 @@
 import type { DetailScreen } from "@/lib/types";
 
-export type CopyQualitySeverity = "error" | "warning";
+type CopyQualitySeverity = "error" | "warning";
 
-export type CopyQualityIssueCode =
+type CopyQualityIssueCode =
   | "headline_too_long"
   | "subheadline_too_long"
   | "body_too_long"
@@ -146,7 +146,7 @@ const TECHNICAL_HEADLINE_RULES: readonly RegExp[] = [
 ];
 
 const DANGLING_END_PATTERN =
-  /(?:，|,|、|：|:|以及|并且|而且|但是|同时|通过|采用|搭配|包含|包括|用于|让|把|将|与|和|及|为|从|向|在)$/u;
+  /(?:，|,|、|：|:|以及|并且|而且|但是|同时|通过|采用|搭配|包含|包括|用于|让|把|将|与|和|及|为|从|向|在|更)$/u;
 
 const WARMTH_RULES: readonly RegExp[] = [
   /好好吃饭/u,
@@ -536,19 +536,20 @@ function inspectScreen(
     );
   }
 
-  if (isSentenceFragment(screen.copy.body)) {
+  fieldEntries(screen).forEach(({ field, value }) => {
+    if (!isSentenceFragment(value)) return;
     issues.push(
       createIssue({
         code: "sentence_fragment",
         severity: "error",
         screenId: screen.id,
-        path: bodyPath,
-        message: "正文以连接词、标点或未闭合符号结尾，属于残句。",
-        evidence: `当前正文：“${screen.copy.body}”`,
-        suggestion: `重新写成不超过45字的完整自然句，严禁按字符截断。${FACT_PRESERVATION_NOTE}`
+        path: fieldPath(screenIndex, field),
+        message: "文案以连接词、标点或未闭合符号结尾，属于残句。",
+        evidence: `当前文案：“${value}”`,
+        suggestion: `重新写成符合本字段长度限制的完整表达，严禁按字符截断。${FACT_PRESERVATION_NOTE}`
       })
     );
-  }
+  });
 
   issues.push(
     ...createFieldToneIssues(
@@ -556,7 +557,8 @@ function inspectScreen(
       screenIndex,
       ADVERTISING_TONE_RULES,
       "advertising_tone",
-      "广告腔词"
+      "广告腔词",
+      "error"
     ),
     ...createFieldToneIssues(
       screen,

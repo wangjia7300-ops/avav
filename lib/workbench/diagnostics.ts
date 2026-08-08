@@ -2,6 +2,16 @@ import type { ApiMeta } from "@/lib/workbench/api-client";
 
 const SENSITIVE_DIAGNOSTIC_KEY =
   /api.?key|authorization|bearer|provider.?config|data.?url|reference.?images?|assets?|file.?path|file.?name/i;
+const REQUEST_ID_ASSIGNMENT_PATTERN =
+  /\b((?:x[\s_-]?)?request[\s_-]?id)\b(\s*[:=]\s*)["']?[^"',，。；;\s}]+["']?/gi;
+
+function shouldDropRequestIdKey(key: string, value: unknown) {
+  const normalized = key.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+  if (normalized === "hasupstreamrequestid" && typeof value === "boolean") {
+    return false;
+  }
+  return normalized.endsWith("requestid");
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -9,6 +19,11 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function sanitizeDiagnosticText(value: string) {
   return value
+    .replace(
+      REQUEST_ID_ASSIGNMENT_PATTERN,
+      (_match, label: string, separator: string) =>
+        `${label}${separator}[已隐藏]`
+    )
     .replace(
       /(["']?api[_-]?key["']?\s*[:=]\s*["']?)[^"',}\s]+/gi,
       "$1[已隐藏]"
@@ -41,12 +56,18 @@ export function sanitizeDiagnosticValue(
   if (!isRecord(value)) return String(value);
 
   return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [
-      key,
-      SENSITIVE_DIAGNOSTIC_KEY.test(key)
-        ? "[已隐藏]"
-        : sanitizeDiagnosticValue(item, depth + 1)
-    ])
+    Object.entries(value).flatMap(([key, item]) =>
+      shouldDropRequestIdKey(key, item)
+        ? []
+        : [
+            [
+              key,
+              SENSITIVE_DIAGNOSTIC_KEY.test(key)
+                ? "[已隐藏]"
+                : sanitizeDiagnosticValue(item, depth + 1)
+            ]
+          ]
+    )
   );
 }
 
@@ -61,16 +82,10 @@ export function detailMessages(value: unknown): string[] {
     return value.flatMap((item) => detailMessages(item));
   }
   if (isRecord(value)) {
-    return Object.entries(value).flatMap(([key, item]) => {
-      if (SENSITIVE_DIAGNOSTIC_KEY.test(key)) {
-        return [`${key}：[已隐藏]`];
-      }
-      if (Array.isArray(item) || isRecord(item)) {
-        const nested = detailMessages(item);
-        return nested.map((message) => `${key}：${message}`);
-      }
-      return [`${key}：${sanitizeDiagnosticText(String(item))}`];
-    });
+    // 对象型 details 是重试、耗时、阶段等机器控制信息，
+    // 由 ApiError.meta 以白名单方式解析，不作为“校验明细”逐项暴露。
+    // 仅后端明确返回的自然语言数组才能进入明细区。
+    return [];
   }
   return [sanitizeDiagnosticText(String(value))];
 }

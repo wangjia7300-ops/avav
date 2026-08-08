@@ -16,7 +16,7 @@ import type { AIProviderConfig } from "@/lib/types";
 
 export type ModelTestPhase = "idle" | "editing" | "testing" | "verified" | "failed";
 
-export type ModelCapability = {
+type ModelCapability = {
   id: string;
   name: string;
   description: string;
@@ -55,6 +55,7 @@ type AIModelStatusProps = {
   result: ModelTestResult | null;
   error: string | null;
   hasSavedConfig: boolean;
+  hasRetainedMetadata: boolean;
   isDraftSaved: boolean;
   canTest: boolean;
   onTest: () => void;
@@ -63,6 +64,7 @@ type AIModelStatusProps = {
 function getConnectionCopy(
   phase: ModelTestPhase,
   canTest: boolean,
+  hasRetainedMetadata: boolean,
   isDraftSaved: boolean,
   result: ModelTestResult | null,
   error: string | null
@@ -72,7 +74,7 @@ function getConnectionCopy(
   }
 
   if (phase === "verified") {
-    return result?.message ?? "模型连接与图片理解测试通过，配置已安全保存。";
+    return result?.message ?? "模型连接与图片理解测试通过，本次页面打开期间可以使用。";
   }
 
   if (phase === "failed") {
@@ -80,14 +82,17 @@ function getConnectionCopy(
   }
 
   if (!canTest) {
+    if (hasRetainedMetadata) {
+      return "供应商、模型和 Endpoint 已保留；为保护密钥，请重新输入 API Key。";
+    }
     return "请先完整填写 API Key、模型，以及自定义供应商的 HTTPS Endpoint。";
   }
 
   if (isDraftSaved) {
-    return "当前配置已保存。修改字段后离开输入框会自动重新测试。";
+    return "当前配置已在本次页面打开期间启用。修改字段后会自动重新测试。";
   }
 
-  return "配置填写完成；离开当前输入框后会自动测试，通过后才会保存。";
+  return "配置填写完成；离开当前输入框后会自动测试，通过后在本次页面打开期间启用。";
 }
 
 export function AIModelStatus({
@@ -96,6 +101,7 @@ export function AIModelStatus({
   result,
   error,
   hasSavedConfig,
+  hasRetainedMetadata,
   isDraftSaved,
   canTest,
   onTest
@@ -104,7 +110,14 @@ export function AIModelStatus({
   const isVerified = phase === "verified";
   const isFailed = phase === "failed";
   const capabilities = result?.capabilities?.length ? result.capabilities : defaultCapabilities;
-  const connectionCopy = getConnectionCopy(phase, canTest, isDraftSaved, result, error);
+  const connectionCopy = getConnectionCopy(
+    phase,
+    canTest,
+    hasRetainedMetadata,
+    isDraftSaved,
+    result,
+    error
+  );
 
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
@@ -142,8 +155,23 @@ export function AIModelStatus({
         </div>
         <div className="rounded-lg border bg-slate-50/70 p-3">
           <p className="text-xs font-medium text-muted-foreground">API 配置</p>
-          <Badge variant={isDraftSaved ? "success" : hasSavedConfig ? "violet" : "secondary"} className="mt-2">
-            {isDraftSaved ? "已保存" : hasSavedConfig ? "修改待验证" : "待验证"}
+          <Badge
+            variant={
+              isDraftSaved
+                ? "success"
+                : hasSavedConfig || hasRetainedMetadata
+                  ? "violet"
+                  : "secondary"
+            }
+            className="mt-2"
+          >
+            {isDraftSaved
+              ? "本次打开可用"
+              : hasSavedConfig
+                ? "修改待验证"
+                : hasRetainedMetadata
+                  ? "需重新输入 Key"
+                  : "待验证"}
           </Badge>
         </div>
         <div className="rounded-lg border bg-slate-50/70 p-3">

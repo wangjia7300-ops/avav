@@ -12,14 +12,12 @@ function makeAssets(): ProjectAsset[] {
       id: "asset-1",
       name: "test-front.png",
       dataUrl: "data:image/png;base64,dGVzdDE=",
-      kind: "product",
       size: 5
     },
     {
       id: "asset-2",
       name: "test-detail.png",
       dataUrl: "data:image/png;base64,dGVzdDI=",
-      kind: "detail",
       size: 5
     }
   ];
@@ -91,30 +89,19 @@ describe("skill-suite store 竞态防护（runEpoch）", () => {
     expect(useSkillSuiteStore.getState().project.qa).toBeNull();
   });
 
-  it("setAssetKind 只改指定素材的 kind，不影响其他素材", () => {
-    useSkillSuiteStore.getState().setAssets(makeAssets());
-
-    useSkillSuiteStore.getState().setAssetKind("asset-1", "scene");
-
-    const assets = useSkillSuiteStore.getState().project.assets;
-    expect(assets.find((asset) => asset.id === "asset-1")?.kind).toBe("scene");
-    expect(assets.find((asset) => asset.id === "asset-2")?.kind).toBe("detail");
-  });
-
-  it("setAssetKind 不级联清空 research / plan / executions / qa，也不改变 runEpoch", () => {
+  it("切换参与生图的素材选择只使视觉输入失效，不删除15屏文案结果", () => {
     useSkillSuiteStore.getState().setAssets(makeAssets());
     populateDownstream();
     const epochBefore = useSkillSuiteStore.getState().runEpoch;
 
-    useSkillSuiteStore.getState().setAssetKind("asset-2", "scene");
+    useSkillSuiteStore.getState().invalidateVisualInputs();
 
     const state = useSkillSuiteStore.getState();
-    expect(state.project.assets.find((asset) => asset.id === "asset-2")?.kind).toBe("scene");
     expect(state.project.research).not.toBeNull();
     expect(state.project.plan).not.toBeNull();
     expect(Object.keys(state.project.executions)).toHaveLength(15);
-    expect(state.project.qa).not.toBeNull();
-    expect(state.runEpoch).toBe(epochBefore);
+    expect(state.project.qa).toBeNull();
+    expect(state.runEpoch).toBe(epochBefore + 1);
   });
 
   it("对照：setAssets 才会级联清空下游结果并推进 runEpoch", () => {

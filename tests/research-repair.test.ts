@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildResearchRepairIssueList,
   collectResearchStructureIssues,
   RESEARCH_AUDIT_KEYS
 } from "@/lib/skill-suite/research-normalization";
-import { buildResearchRepairPrompt } from "@/lib/skill-suite/prompts";
 
 function validAudit() {
   return RESEARCH_AUDIT_KEYS.map((key) => ({
@@ -105,64 +103,6 @@ describe("图研修复管线：字段级跨范围命中反馈", () => {
     expect(conflict?.message).toContain("工作机制(mechanism)");
     // 同范围词（省力属于 performance 自身）不应被当成跨范围命中。
     expect(conflict?.message).not.toContain("性能/用户效果(performance)");
-  });
-});
-
-describe("图研修复管线：修复提示词契约", () => {
-  it("修复提示词包含拆分操作契约、数量约束与「双驱旋转」拆分示例", () => {
-    const payload = validResearchPayload();
-    payload.facts[0] = {
-      ...payload.facts[0],
-      label: "桶身外观",
-      value: "透明桶身，双驱旋转结构",
-      evidence: "产品图可见透明桶身"
-    };
-    const prompt = buildResearchRepairPrompt({
-      rejectedResult: payload,
-      issues: buildResearchRepairIssueList(payload, ALLOWED_ASSETS),
-      assetIds: ["asset-01"],
-      notes: ""
-    });
-
-    // 拆分操作契约逐条落地。
-    expect(prompt).toContain("删除被点名的复合事实原记录");
-    expect(prompt).toContain("新 id 必须唯一");
-    expect(prompt).toContain("复用原记录的 sourceAssetIds");
-    expect(prompt).toContain("禁止只修改 claimScope");
-    expect(prompt).toContain("禁止把完整 OCR 原句复制到拆出的每条 evidence");
-    expect(prompt).toContain("6–12条");
-    // 拆分示例必须携带「双驱旋转」这类真实复合句拆法。
-    expect(prompt).toContain("双驱旋转");
-    // 字段级命中反馈必须原样流入提示词，修复模型才能定点执行。
-    expect(prompt).toContain("facts[0].value 命中");
-    expect(prompt).toContain("工作机制(mechanism)");
-    expect(prompt).toContain("asset-01");
-  });
-
-  it("textOnly=true 时切换为纯文本结构修复口径，false/缺省则不出现", () => {
-    const base = {
-      rejectedResult: { productName: "旋转拖把套装" },
-      issues: ["1. [INVALID_COUNT] facts：facts 必须包含6到12条原子事实，当前为3条。"],
-      assetIds: ["asset-01"],
-      notes: ""
-    };
-
-    const textOnlyPrompt = buildResearchRepairPrompt({
-      ...base,
-      textOnly: true
-    });
-    expect(textOnlyPrompt).toContain("纯文本结构修复");
-    expect(textOnlyPrompt).toContain("本条消息不携带图片");
-
-    const explicitFalsePrompt = buildResearchRepairPrompt({
-      ...base,
-      textOnly: false
-    });
-    const omittedPrompt = buildResearchRepairPrompt(base);
-    for (const prompt of [explicitFalsePrompt, omittedPrompt]) {
-      expect(prompt).not.toContain("纯文本结构修复");
-      expect(prompt).not.toContain("本条消息不携带图片");
-    }
   });
 });
 

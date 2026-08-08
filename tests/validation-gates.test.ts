@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertQAModelResponse,
   assertQAReport,
   assertResearch,
   extractJsonObject,
@@ -172,7 +173,7 @@ describe("assertQAReport 质检报告闸门", () => {
     expect(() => assertQAReport(qa)).not.toThrow();
   });
 
-  it("绿例：手工构造的最小合法报告也通过", () => {
+  it("绿例：模型只需返回 findings 与 summary，由服务端补齐状态", () => {
     const minimal = {
       findings: [
         {
@@ -186,7 +187,18 @@ describe("assertQAReport 质检报告闸门", () => {
       ],
       summary: "存在1个需要修复的阻断问题。"
     };
-    expect(() => assertQAReport(minimal)).not.toThrow();
+    expect(() => assertQAModelResponse(minimal)).not.toThrow();
+  });
+
+  it("红例：正式报告缺少状态与覆盖率时拒绝通过", () => {
+    const minimal = {
+      findings: [],
+      summary: "没有发现规则问题。"
+    };
+    expectSkillSuiteError(
+      () => assertQAReport(minimal),
+      "QA_SCHEMA_INVALID"
+    );
   });
 
   it("红例：findings 中 severity 非法时抛 QA_SCHEMA_INVALID", () => {

@@ -152,12 +152,161 @@ describe("workbench API observability", () => {
       status: 422,
       code: "PLAN_BATCH_INVALID",
       phase: "planning-batch",
-      details: [
-        "stage：planning-batch",
-        "batchId：screens-7-9",
-        "retryable：true"
-      ]
+      details: []
     });
+  });
+
+  it("marks provider timeout as retryable for the current workbench stage", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            success: false,
+            error:
+              "火山方舟 Ark 暂时响应较慢。本次未写入不完整结果，已完成资料仍保留，可重试当前阶段。",
+            code: "AI_PROVIDER_TIMEOUT",
+            details: {
+              retryable: true,
+              failureOrigin: "sdk_timeout",
+              elapsedMs: 240_000,
+              attempt: 1,
+              maxAttempts: 2
+            }
+          }),
+          {
+            status: 504,
+            headers: { "Content-Type": "application/json" }
+          }
+        )
+      )
+    );
+
+    let caught: unknown;
+    try {
+      await postJson("/api/skill-suite", { stage: "research" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ApiError);
+    expect(toWorkError(caught)).toMatchObject({
+      status: 504,
+      code: "AI_PROVIDER_TIMEOUT",
+      retryable: true,
+      details: [],
+      meta: {
+        retryable: true,
+        failureOrigin: "sdk_timeout",
+        elapsedMs: 240_000,
+        attempt: 1,
+        maxAttempts: 2
+      }
+    });
+  });
+
+  it("将策划阶段时间预算用尽标记为可重试", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            success: false,
+            error: "策划阶段已用完本次时间预算，当前结果未发布。",
+            code: "PLAN_TIME_BUDGET_EXCEEDED",
+            details: ["时间预算：270000ms"]
+          }),
+          {
+            status: 422,
+            headers: { "Content-Type": "application/json" }
+          }
+        )
+      )
+    );
+
+    let caught: unknown;
+    try {
+      await postJson("/api/skill-suite", { stage: "planning" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(toWorkError(caught)).toMatchObject({
+      code: "PLAN_TIME_BUDGET_EXCEEDED",
+      retryable: true
+    });
+  });
+
+  it("服务端显式标记不可重试时覆盖 HTTP 状态推断", () => {
+    const error = new ApiError({
+      status: 502,
+      message: "服务端内部异常。",
+      code: "AI_PROVIDER_REQUEST_FAILED",
+      details: { retryable: false }
+    });
+
+    expect(error.retryable).toBe(false);
+  });
+
+  it("postJson 到 toWorkError 的浏览器链路彻底移除上游请求 ID", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            success: false,
+            error:
+              "模型供应商请求失败，requestId=req-message-private，x-request-id: trace-message-private",
+            code: "AI_PROVIDER_REQUEST_FAILED",
+            details: {
+              retryable: true,
+              failureOrigin: "unknown",
+              requestId: "req-details-private"
+            },
+            meta: {
+              request_id: "req-meta-private",
+              "x-request-id": "trace-meta-private",
+              hasUpstreamRequestId: true,
+              nested: {
+                upstreamRequestId: "req-nested-private"
+              }
+            }
+          }),
+          {
+            status: 502,
+            headers: { "Content-Type": "application/json" }
+          }
+        )
+      )
+    );
+
+    let caught: unknown;
+    try {
+      await postJson("/api/skill-suite", { stage: "research" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ApiError);
+    const apiError = caught as ApiError;
+    const workError = toWorkError(apiError);
+    for (const secret of [
+      "req-message-private",
+      "trace-message-private",
+      "req-details-private",
+      "req-meta-private",
+      "trace-meta-private",
+      "req-nested-private"
+    ]) {
+      expect(apiError.message).not.toContain(secret);
+      expect(JSON.stringify(apiError.meta)).not.toContain(secret);
+      expect(workError.message).not.toContain(secret);
+      expect(JSON.stringify(workError.meta)).not.toContain(secret);
+    }
+    expect(apiError.meta).toMatchObject({ hasUpstreamRequestId: true });
+    expect(apiError.meta).not.toHaveProperty("request_id");
+    expect(apiError.meta).not.toHaveProperty("x-request-id");
+    expect(apiError.meta?.nested).toEqual({});
   });
 
   it("normalizes local errors into a safe workbench error", () => {
@@ -175,7 +324,7 @@ describe("workbench API observability", () => {
   });
 });
 
-describe("planning result isolation", () => {
+describe("planning last-known-good recovery", () => {
   beforeEach(() => {
     useSkillSuiteStore.getState().resetProject();
   });
@@ -184,7 +333,7 @@ describe("planning result isolation", () => {
     useSkillSuiteStore.getState().resetProject();
   });
 
-  it("clears the old plan and every downstream result before a new planning run", () => {
+  it("keeps the published plan and downstream results until replacement planning succeeds", () => {
     const previous = createEmptyProject();
     const previousResearch = {
       productName: "仅用于状态测试"
@@ -208,9 +357,9 @@ describe("planning result isolation", () => {
     let state = useSkillSuiteStore.getState();
 
     expect(state.project.research).toBe(previousResearch);
-    expect(state.project.plan).toBeNull();
-    expect(state.project.executions).toEqual({});
-    expect(state.project.qa).toBeNull();
+    expect(state.project.plan).toBe(previous.plan);
+    expect(state.project.executions).toBe(previous.executions);
+    expect(state.project.qa).toBe(previous.qa);
     expect(state.stage).toBe("planning");
     expect(state.selectedScreenId).toBe("screen-01");
     expect(state.workStatus).toBe("running");
@@ -226,9 +375,9 @@ describe("planning result isolation", () => {
     });
     state = useSkillSuiteStore.getState();
 
-    expect(state.project.plan).toBeNull();
-    expect(state.project.executions).toEqual({});
-    expect(state.project.qa).toBeNull();
+    expect(state.project.plan).toBe(previous.plan);
+    expect(state.project.executions).toBe(previous.executions);
+    expect(state.project.qa).toBe(previous.qa);
     expect(state.error?.code).toBe("PLAN_QUALITY_INVALID");
   });
 });

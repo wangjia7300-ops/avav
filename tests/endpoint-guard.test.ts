@@ -195,6 +195,14 @@ describe("assertTrustedChatProviderConfig", () => {
         })
       )
     ).resolves.toBeUndefined();
+    await expect(
+      assertTrustedChatProviderConfig(
+        chatConfig({
+          providerId: "gemini",
+          baseURL: "https://generativelanguage.googleapis.com/v1beta"
+        })
+      )
+    ).resolves.toBeUndefined();
     expect(mockedLookup).not.toHaveBeenCalled();
   });
 

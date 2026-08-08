@@ -1,5 +1,11 @@
+import { createHash } from "node:crypto";
 import { parseImageProviderConfig } from "@/lib/image-providers";
-import { compileScreenImagePrompt } from "@/lib/skill-suite/prompts";
+import {
+  API_BODY_LIMITS,
+  assertLocalApiRequest,
+  readJsonRequestBody
+} from "@/lib/security/request-guard";
+import { compileScreenImagePrompt } from "@/lib/skill-suite/jimeng-prompt-translator";
 import { jsonNoStore } from "@/lib/skill-suite/server/http";
 import { generateImageFromPrompt } from "@/lib/services/generate-image-from-prompt";
 import { serializeApiError, ServiceError } from "@/lib/services/errors";
@@ -14,12 +20,32 @@ export const maxDuration = 300;
 
 // 注意：幂等状态是进程内存级的，仅在单进程长驻部署下有效；
 // 多实例 / Serverless 需改用带 TTL 的外部存储。
-const inFlight = new Map<string, Promise<GeneratedImageAsset>>();
-const completedRequestIds = new Set<string>();
+const COMPLETED_REQUEST_TTL_MS = 10 * 60_000;
+// 仅保留最近一组15屏的回放结果，避免 base64 成图长期占用进程内存。
+const MAX_COMPLETED_REQUESTS = 16;
+type IdempotentImageOperation = {
+  fingerprint: string;
+  promise: Promise<GeneratedImageAsset>;
+};
+type CompletedImageOperation = {
+  fingerprint: string;
+  image: GeneratedImageAsset;
+  expiresAt: number;
+};
+const inFlight = new Map<string, IdempotentImageOperation>();
+const completedRequests = new Map<string, CompletedImageOperation>();
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as {
+    assertLocalApiRequest(request, {
+      method: "POST",
+      requireJson: true,
+      maxContentLength: API_BODY_LIMITS.imageGeneration
+    });
+    const body = (await readJsonRequestBody(
+      request,
+      API_BODY_LIMITS.imageGeneration
+    )) as {
       requestId?: string;
       screen?: DetailScreen;
       execution?: ScreenExecution;
@@ -33,12 +59,6 @@ export async function POST(request: Request) {
         code: "IMAGE_IDEMPOTENCY_REQUIRED"
       });
     }
-    if (completedRequestIds.has(body.requestId)) {
-      throw new ServiceError("该生图请求已完成，已阻止使用同一请求号重复扣费。", {
-        statusCode: 409,
-        code: "IMAGE_REQUEST_ALREADY_COMPLETED"
-      });
-    }
     const imageProviderConfig = parseImageProviderConfig(body.imageProviderConfig);
     if (!imageProviderConfig) {
       throw new ServiceError("请先在“生图模型”中完成独立配置。", {
@@ -50,6 +70,8 @@ export async function POST(request: Request) {
       !body.screen ||
       !body.execution ||
       body.execution.screenId !== body.screen.id ||
+      !body.execution.copyFinal ||
+      !Array.isArray(body.execution.copyFinal.keyPoints) ||
       !Array.isArray(body.facts)
     ) {
       throw new ServiceError("本屏策划、执行结果或事实库不完整。", {
@@ -72,6 +94,26 @@ export async function POST(request: Request) {
       });
     }
 
+    const currentCopy = body.screen.copy;
+    const transportedCopy = body.execution.copyFinal;
+    if (
+      transportedCopy.headline !== currentCopy.headline ||
+      transportedCopy.subheadline !== currentCopy.subheadline ||
+      transportedCopy.body !== currentCopy.body ||
+      transportedCopy.keyPoints.length !== currentCopy.keyPoints.length ||
+      transportedCopy.keyPoints.some(
+        (point, index) => point !== currentCopy.keyPoints[index]
+      )
+    ) {
+      throw new ServiceError(
+        "本屏执行稿仍引用旧文案，请重新生成本屏交付后再生图。",
+        {
+          statusCode: 409,
+          code: "IMAGE_PROMPT_STALE"
+        }
+      );
+    }
+
     const prompt = compileScreenImagePrompt({
       screen: body.screen,
       execution: body.execution,
@@ -83,21 +125,49 @@ export async function POST(request: Request) {
         code: "IMAGE_PROMPT_STALE"
       });
     }
+
+    const fingerprint = buildRequestFingerprint({
+      screenId: body.screen.id,
+      prompt,
+      negativePrompt: body.execution.negativePrompt,
+      providerId: imageProviderConfig.providerId,
+      imageModel: imageProviderConfig.imageModel,
+      referenceImages: body.referenceImages
+    });
+    const completed = completedRequests.get(body.requestId);
+    if (completed) {
+      if (completed.expiresAt <= Date.now()) {
+        completedRequests.delete(body.requestId);
+      } else {
+        assertMatchingFingerprint(completed.fingerprint, fingerprint);
+        return jsonNoStore({
+          success: true,
+          data: completed.image,
+          meta: { replayed: true }
+        });
+      }
+    }
+
     let operation = inFlight.get(body.requestId);
-    if (!operation) {
-      operation = generateImageFromPrompt({
-        prompt,
-        negativePrompt: body.execution.negativePrompt,
-        imageType: "detail_page",
-        referenceImages: body.referenceImages,
-        imageProviderConfig
-      });
+    if (operation) {
+      assertMatchingFingerprint(operation.fingerprint, fingerprint);
+    } else {
+      operation = {
+        fingerprint,
+        promise: generateImageFromPrompt({
+          prompt,
+          negativePrompt: body.execution.negativePrompt,
+          imageType: "detail_page",
+          referenceImages: body.referenceImages,
+          imageProviderConfig,
+          signal: request.signal
+        })
+      };
       inFlight.set(body.requestId, operation);
     }
     try {
-      const image = await operation;
-      completedRequestIds.add(body.requestId);
-      forgetCompletedRequest(body.requestId);
+      const image = await operation.promise;
+      rememberCompletedRequest(body.requestId, fingerprint, image);
       return jsonNoStore({ success: true, data: image });
     } finally {
       if (inFlight.get(body.requestId) === operation) {
@@ -113,8 +183,58 @@ export async function POST(request: Request) {
   }
 }
 
-function forgetCompletedRequest(requestId: string) {
-  setTimeout(() => {
-    completedRequestIds.delete(requestId);
-  }, 60_000);
+function buildRequestFingerprint(input: {
+  screenId: string;
+  prompt: string;
+  negativePrompt: string;
+  providerId: string;
+  imageModel: string;
+  referenceImages: readonly string[];
+}) {
+  const hash = createHash("sha256");
+  [
+    input.screenId,
+    input.prompt,
+    input.negativePrompt,
+    input.providerId,
+    input.imageModel
+  ].forEach((value) => {
+    hash.update(value);
+    hash.update("\0");
+  });
+  input.referenceImages.forEach((image) => {
+    hash.update(image);
+    hash.update("\0");
+  });
+  return hash.digest("hex");
+}
+
+function assertMatchingFingerprint(current: string, incoming: string) {
+  if (current !== incoming) {
+    throw new ServiceError("同一生图请求号不能用于不同的页面或输入。", {
+      statusCode: 409,
+      code: "IMAGE_IDEMPOTENCY_CONFLICT"
+    });
+  }
+}
+
+function rememberCompletedRequest(
+  requestId: string,
+  fingerprint: string,
+  image: GeneratedImageAsset
+) {
+  while (completedRequests.size >= MAX_COMPLETED_REQUESTS) {
+    const oldest = completedRequests.keys().next().value;
+    if (!oldest) break;
+    completedRequests.delete(oldest);
+  }
+
+  const expiresAt = Date.now() + COMPLETED_REQUEST_TTL_MS;
+  completedRequests.set(requestId, { fingerprint, image, expiresAt });
+  const timer = setTimeout(() => {
+    if (completedRequests.get(requestId)?.expiresAt === expiresAt) {
+      completedRequests.delete(requestId);
+    }
+  }, COMPLETED_REQUEST_TTL_MS);
+  timer.unref?.();
 }

@@ -8,6 +8,7 @@ import {
   ShieldWarning,
   WarningCircle
 } from "@phosphor-icons/react";
+import { MAX_UPLOAD_IMAGE_COUNT } from "@/lib/config";
 import type { EvidenceFact, ProductResearch } from "@/lib/types";
 
 type ResearchPanelProps = {
@@ -54,10 +55,10 @@ export function ResearchPanel({
     return (
       <section className="stage-empty">
         <span className="stage-empty-icon"><MagnifyingGlass size={30} /></span>
-        <p className="eyebrow">技能 01 · 图片研究</p>
+        <p className="eyebrow">阶段 01 · 图片研究</p>
         <h1>先把甲方图片事实与模型推测分开</h1>
         <p>
-          上传 1–5 张多角度产品图。系统将完成八维视觉审计，图片内可识别内容可用于文案，模型推测会被单独阻断。
+          上传 1–{MAX_UPLOAD_IMAGE_COUNT} 张多角度产品图。系统将完成八维视觉审计，图片内可识别内容可用于文案，模型推测会被单独阻断。
         </p>
         <div className="stage-empty-list">
           <span><CheckCircle size={17} /> 构图、色彩、字体、视觉动线</span>
@@ -88,7 +89,7 @@ export function ResearchPanel({
     <section className="document-panel">
       <div className="document-titlebar">
         <div>
-          <p className="eyebrow">技能 01 · 图片研究</p>
+          <p className="eyebrow">阶段 01 · 图片研究</p>
           <h1>{research.productName}</h1>
           <p>{research.summary}</p>
         </div>

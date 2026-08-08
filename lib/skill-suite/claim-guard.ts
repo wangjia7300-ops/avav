@@ -5,7 +5,7 @@ import type {
   ScreenCopy
 } from "@/lib/types";
 
-export type ClaimGuardIssueKind =
+type ClaimGuardIssueKind =
   | "claim-strength-escalation"
   | "claim-scope-mismatch"
   | "creative-claim-without-evidence"
@@ -23,7 +23,7 @@ export type ClaimGuardIssue = {
   fix: string;
 };
 
-export type ClaimGuardExecution = {
+type ClaimGuardExecution = {
   screenId: string;
   visualInstruction?: string;
   visualPrompt?: string;

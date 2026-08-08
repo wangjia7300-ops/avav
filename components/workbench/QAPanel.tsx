@@ -31,6 +31,19 @@ type QAPanelProps = {
   onRun: () => void;
 };
 
+const qaStatusLabels: Record<QAReport["status"], string> = {
+  incomplete: "输入不完整",
+  rules_only: "仅完成规则质检",
+  prompt_complete: "提示词规范质检完成",
+  blocked: "存在阻断问题"
+};
+
+const publishDecisionLabels: Record<QAReport["publishDecision"], string> = {
+  not_ready: "尚未具备交付条件",
+  review_required: "需要人工或成图复核",
+  ready: "全部目标检查已完成"
+};
+
 function exportReport(report: QAReport) {
   const findings = report.findings
     .map(
@@ -38,9 +51,31 @@ function exportReport(report: QAReport) {
         `## ${item.severity === "error" ? "❌" : item.severity === "warning" ? "⚠️" : "✅"} ${item.title}\n\n- 模块：${item.module}\n- 屏幕：${item.screenId ?? "全局"}\n- 证据：${item.evidence}\n- 修正：${item.fix}`
     )
     .join("\n\n");
-  const blob = new Blob([`# 15屏详情页质检报告\n\n${report.summary}\n\n${findings}`], {
-    type: "text/markdown;charset=utf-8"
-  });
+  const notEvaluated = report.notEvaluated
+    .map(
+      (item) =>
+        `- ${item.check}：not_evaluated — ${item.reason}` +
+        (item.screenIds?.length ? `（${item.screenIds.join("、")}）` : "")
+    )
+    .join("\n");
+  const coverage = [
+    `- 状态：${report.status}（${qaStatusLabels[report.status]}）`,
+    `- 交付决策：${report.publishDecision}（${publishDecisionLabels[report.publishDecision]}）`,
+    `- 策划覆盖：${report.coverage.planScreens}/15`,
+    `- 执行覆盖：${report.coverage.executionScreens}/15`,
+    `- 真实成图覆盖：${report.coverage.generatedImageScreens}/15`,
+    `- 像素质检覆盖：${report.coverage.pixelVerifiedScreens}/15`
+  ].join("\n");
+  const blob = new Blob(
+    [
+      `# 15屏详情页质检报告\n\n## 检查范围\n\n${coverage}\n\n` +
+        `## 未评估项\n\n${notEvaluated || "- 无"}\n\n` +
+        `## 总结\n\n${report.summary}\n\n${findings}`
+    ],
+    {
+      type: "text/markdown;charset=utf-8"
+    }
+  );
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -60,10 +95,10 @@ export function QAPanel({
   onRun
 }: QAPanelProps) {
   const [view, setView] = useState<QAView>("page");
-  const [publishConfirmed, setPublishConfirmed] = useState(false);
+  const [handoffConfirmed, setHandoffConfirmed] = useState(false);
 
   useEffect(() => {
-    setPublishConfirmed(false);
+    setHandoffConfirmed(false);
   }, [qa]);
   const selected =
     plan?.screens.find((screen) => screen.id === selectedScreenId) ?? plan?.screens[0];
@@ -82,7 +117,7 @@ export function QAPanel({
     return (
       <section className="stage-empty">
         <span className="stage-empty-icon"><LockKey size={30} /></span>
-        <p className="eyebrow">技能 04 · 独立质检</p>
+        <p className="eyebrow">阶段 04 · 独立质检</p>
         <h1>请先完成15屏策划</h1>
         <p>质检模块只读取结果，不会静默修改文案、证据或提示词。</p>
       </section>
@@ -93,11 +128,11 @@ export function QAPanel({
     return (
       <section className="stage-empty">
         <span className="stage-empty-icon"><ShieldCheck size={30} /></span>
-        <p className="eyebrow">技能 04 · 独立质检</p>
-        <h1>对15屏结果做只读审查</h1>
-        <p>覆盖策划、前三屏、卖点、信任、移动端、AI标识、广告法、可访问性、暗色模式与迭代等14个模块。</p>
+        <p className="eyebrow">阶段 04 · 独立质检</p>
+        <h1>对现有结果做只读规范审查</h1>
+        <p>会明确显示已检查覆盖率；缺屏、模型失败和未检查真实成图都不会被计为通过。</p>
         <button type="button" className="primary-action" onClick={onRun} disabled={running}>
-          {running ? "正在运行规则与模型质检…" : "运行完整质检"}
+          {running ? "正在运行规则与模型质检…" : "运行规范质检"}
         </button>
       </section>
     );
@@ -108,8 +143,8 @@ export function QAPanel({
       <div className="qa-document">
         <div className="qa-titlebar">
           <div>
-            <p className="eyebrow">技能 04 · 独立质检</p>
-            <h1>15屏详情页 · 质检报告</h1>
+            <p className="eyebrow">阶段 04 · 独立质检</p>
+            <h1>15屏详情页 · 规范质检报告</h1>
           </div>
           <div className="qa-view-tabs">
             <button type="button" className={view === "page" ? "is-active" : ""} onClick={() => setView("page")}>完整页面</button>
@@ -183,9 +218,9 @@ export function QAPanel({
               </>
             ) : (
               <>
-                <SpecRow label="English Prompt" value={execution?.englishPrompt ?? "尚未生成"} />
-                <SpecRow label="Negative Prompt" value={execution?.negativePrompt ?? "尚未生成"} />
-                <SpecRow label="视觉指令" value={execution?.visualInstruction ?? "尚未生成"} />
+                <SpecRow label="即梦生图指令" value={execution?.englishPrompt ?? "尚未生成"} />
+                <SpecRow label="即梦约束条件" value={execution?.negativePrompt ?? "尚未生成"} />
+                <SpecRow label="即梦视觉草稿" value={execution?.visualInstruction ?? "尚未生成"} />
                 <SpecRow label="来源" value={execution?.source === "model" ? "真实模型" : "示例/未生成"} />
               </>
             )}
@@ -205,6 +240,24 @@ export function QAPanel({
         </div>
 
         <p className="qa-summary">{qa.summary}</p>
+        <p className="qa-policy-note">
+          <strong>{qaStatusLabels[qa.status]}</strong>
+          {" · "}
+          {publishDecisionLabels[qa.publishDecision]}
+          <br />
+          覆盖：策划 {qa.coverage.planScreens}/15 · 执行{" "}
+          {qa.coverage.executionScreens}/15 · 真实成图{" "}
+          {qa.coverage.generatedImageScreens}/15 · 像素质检{" "}
+          {qa.coverage.pixelVerifiedScreens}/15
+        </p>
+        {qa.notEvaluated.length ? (
+          <p className="qa-policy-note">
+            未评估：
+            {qa.notEvaluated
+              .map((item) => `${item.check}=not_evaluated（${item.reason}）`)
+              .join("；")}
+          </p>
+        ) : null}
         <p className="qa-policy-note">
           用户上传图片内的可识别内容均属于甲方基础资料，可直接进入文案并改善语义。敏感内容只做人工复核提示，不会因缺少外部报告被自动删除。
         </p>
@@ -245,18 +298,22 @@ export function QAPanel({
           <button
             type="button"
             className="publish-action"
-            disabled={groups.error.length > 0}
+            disabled={qa.status !== "prompt_complete" || groups.error.length > 0}
             onClick={() => {
               exportReport(qa);
-              setPublishConfirmed(true);
+              setHandoffConfirmed(true);
             }}
           >
-            {publishConfirmed ? <CheckCircle size={17} weight="fill" /> : <LockKey size={17} />}
-            {groups.error.length
-              ? "处理高风险声明后发布"
-              : publishConfirmed
-                ? "已确认发布 · 报告已导出"
-                : "确认可发布并导出报告"}
+            {handoffConfirmed ? <CheckCircle size={17} weight="fill" /> : <LockKey size={17} />}
+            {qa.status === "incomplete"
+              ? "补齐15屏后再确认"
+              : qa.status === "rules_only"
+                ? "完成语义质检后再确认"
+                : qa.status === "blocked" || groups.error.length
+                  ? "处理阻断问题后再确认"
+                  : handoffConfirmed
+                    ? "规范报告已导出 · 待成图复核"
+                    : "确认规范检查完成并导出"}
           </button>
         </div>
       </aside>

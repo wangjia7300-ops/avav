@@ -1,8 +1,3 @@
-import {
-  MAX_TOTAL_UPLOAD_IMAGE_BYTES,
-  MAX_UPLOAD_IMAGE_BYTES,
-  MAX_UPLOAD_IMAGE_COUNT
-} from "@/lib/config";
 import { IMAGE_PROVIDER_PRESETS } from "@/lib/image-providers";
 import {
   assertPublicEndpoint,
@@ -13,15 +8,19 @@ import type {
   GeneratedImageAsset,
   ImageProviderConfig
 } from "@/lib/types";
+import { sanitizeDataImages } from "@/lib/uploads/sanitize-image";
+import sharp, { type Metadata } from "sharp";
 
 type ImageType = "detail_page";
 
 type GenerateImageFromPromptInput = {
   prompt: string;
+  /** @deprecated 即梦/Seedream 没有独立 negative_prompt；约束已由服务端编译进 prompt。 */
   negativePrompt?: string;
   imageType: ImageType;
   referenceImages?: readonly string[];
   imageProviderConfig?: ImageProviderConfig | null;
+  signal?: AbortSignal;
 };
 
 type ResolvedImageConfig = {
@@ -50,8 +49,23 @@ const IMAGE_REQUEST_TIMEOUT_MS = Number(process.env.IMAGE_REQUEST_TIMEOUT_MS) ||
 const MAX_PROMPT_LENGTH = 12_000;
 const MAX_NEGATIVE_PROMPT_LENGTH = 6_000;
 const MAX_BASE64_LENGTH = 28_000_000;
-const MAX_ASPECT_RATIO_RELATIVE_ERROR = 0.01;
+const MAX_UPSTREAM_JSON_BYTES = 32 * 1024 * 1024;
+const MAX_GENERATED_IMAGE_EDGE = 8_000;
+const MAX_GENERATED_IMAGE_PIXELS = 24_000_000;
+const PROVIDER_SOURCE_SIZES = {
+  openai: { width: 1_024, height: 1_536 },
+  volcengine: { width: 1_440, height: 2_560 },
+  // 自定义供应商在界面契约中定义为 OpenAI Images API 兼容端点，
+  // 因此使用兼容性最高的竖图尺寸，再由服务端确定性裁成 9:16。
+  custom: { width: 1_024, height: 1_536 }
+} as const satisfies Record<ResolvedImageConfig["providerId"], ImageDimensions>;
+const OPENAI_CROPPED_SIZE = { width: 864, height: 1_536 } as const;
+// OpenAI 兼容接口的原生 2:3 输出需要保留中央 84.375% 才能交付为 9:16。
+// 允许同等或更小幅度的居中裁切，防止横图/方图被静默裁坏。
+const MIN_GENERATED_IMAGE_RETAINED_FRACTION = 0.84;
 const DATA_URL_PATTERN = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/i;
+const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
+const SUPPORTED_OUTPUT_FORMATS = new Set(["jpeg", "png", "webp"]);
 
 type ImageDimensions = {
   width: number;
@@ -180,19 +194,7 @@ function resolveImageApiConfig(imageProviderConfig?: ImageProviderConfig | null)
   };
 }
 
-function estimateBase64Bytes(value: string) {
-  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
-  return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
-}
-
-function inferBase64MimeType(value: string) {
-  if (value.startsWith("iVBOR")) return "image/png";
-  if (value.startsWith("/9j/")) return "image/jpeg";
-  if (value.startsWith("UklGR")) return "image/webp";
-  return null;
-}
-
-function normalizeReferenceImages(referenceImages?: readonly string[]) {
+async function normalizeReferenceImages(referenceImages?: readonly string[]) {
   if (referenceImages === undefined) return [];
 
   if (!Array.isArray(referenceImages)) {
@@ -202,17 +204,6 @@ function normalizeReferenceImages(referenceImages?: readonly string[]) {
     });
   }
 
-  if (referenceImages.length > MAX_UPLOAD_IMAGE_COUNT) {
-    throw new ServiceError(`生图最多支持 ${MAX_UPLOAD_IMAGE_COUNT} 张产品参考图。`, {
-      statusCode: 400,
-      code: "IMAGE_REFERENCE_LIMIT_EXCEEDED"
-    });
-  }
-
-  let totalBytes = 0;
-  const uniqueReferences: string[] = [];
-  const seenReferences = new Set<string>();
-
   referenceImages.forEach((value, index) => {
     if (typeof value !== "string") {
       throw new ServiceError(`第 ${index + 1} 张产品参考图格式不正确。`, {
@@ -220,48 +211,9 @@ function normalizeReferenceImages(referenceImages?: readonly string[]) {
         code: "IMAGE_REFERENCE_INVALID"
       });
     }
-
-    const match = DATA_URL_PATTERN.exec(value);
-    if (!match) {
-      throw new ServiceError("产品参考图必须是 JPG、PNG 或 WEBP 的 data URL。", {
-        statusCode: 400,
-        code: "IMAGE_REFERENCE_INVALID"
-      });
-    }
-
-    const declaredMimeType = match[1].toLowerCase();
-    const base64 = match[2];
-    const detectedMimeType = inferBase64MimeType(base64);
-    if (detectedMimeType !== declaredMimeType) {
-      throw new ServiceError(`第 ${index + 1} 张产品参考图的内容与文件类型不一致。`, {
-        statusCode: 400,
-        code: "IMAGE_REFERENCE_INVALID"
-      });
-    }
-
-    const estimatedBytes = estimateBase64Bytes(base64);
-    if (!estimatedBytes || estimatedBytes > MAX_UPLOAD_IMAGE_BYTES) {
-      throw new ServiceError(`第 ${index + 1} 张产品参考图过大，请压缩后重试。`, {
-        statusCode: 413,
-        code: "IMAGE_REFERENCE_TOO_LARGE"
-      });
-    }
-
-    totalBytes += estimatedBytes;
-    if (!seenReferences.has(value)) {
-      seenReferences.add(value);
-      uniqueReferences.push(value);
-    }
   });
-
-  if (totalBytes > MAX_TOTAL_UPLOAD_IMAGE_BYTES) {
-    throw new ServiceError("产品参考图总大小过大，请移除或压缩部分图片后重试。", {
-      statusCode: 413,
-      code: "IMAGE_REFERENCE_TOTAL_TOO_LARGE"
-    });
-  }
-
-  return uniqueReferences;
+  const sanitized = await sanitizeDataImages(referenceImages);
+  return sanitized.map((image) => image.dataUrl);
 }
 
 function buildImagePrompt(input: GenerateImageFromPromptInput) {
@@ -282,41 +234,26 @@ function buildImagePrompt(input: GenerateImageFromPromptInput) {
     });
   }
 
+  // Ark Seedream Images API 没有独立 negative_prompt 参数。调用方保留
+  // legacy 字段只用于长度校验/幂等指纹，不能再二次拼入正向指令。
+  return prompt;
+}
+
+function applyProviderFraming(
+  prompt: string,
+  providerId: ResolvedImageConfig["providerId"]
+) {
+  if (providerId === "volcengine") return prompt;
+
   return [
     prompt,
-    negativePrompt ? `需要避免：${negativePrompt}` : ""
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+    "Provider framing contract: the API source canvas is 1024x1536 and will be center-cropped to 864x1536 (exact 9:16). Disregard any other pixel dimensions mentioned in upstream production notes for this render. Keep the complete product silhouette, every required Chinese text block, logo, badges, and all decision-critical details inside the central 84% of the source width (x=8%–92%). Treat both outer side strips as expendable crop area; place only background there. Do not place text or product edges in the crop area."
+  ].join("\n\n");
 }
 
 function resolveRequestedSize(config: ResolvedImageConfig) {
-  if (config.providerId === "volcengine") {
-    return "1440x2560";
-  }
-
-  if (
-    config.providerId === "openai" &&
-    !/^gpt-image-2(?:$|-)/i.test(config.imageModel)
-  ) {
-    throw new ServiceError(
-      "当前 OpenAI 生图模型不支持严格 9:16 自定义尺寸；请改用 GPT Image 2 或支持 1440x2560 的火山方舟模型。",
-      {
-        statusCode: 400,
-        code: "IMAGE_ASPECT_RATIO_UNSUPPORTED"
-      }
-    );
-  }
-
-  if (config.providerId === "openai" && /^gpt-image-2(?:$|-)/i.test(config.imageModel)) {
-    return "1440x2560";
-  }
-
-  return "1440x2560";
-}
-
-function supportsOpenAIReferenceImages(model: string) {
-  return /^(?:gpt-image-|chatgpt-image-)/i.test(model.trim());
+  const dimensions = PROVIDER_SOURCE_SIZES[config.providerId];
+  return `${dimensions.width}x${dimensions.height}`;
 }
 
 function openAIEditFormData(
@@ -332,7 +269,7 @@ function openAIEditFormData(
   form.append("quality", "medium");
   form.append("output_format", "png");
 
-  if (!/^gpt-image-2(?:$|-)/i.test(config.imageModel)) {
+  if (config.providerId === "openai") {
     form.append("input_fidelity", "high");
   }
 
@@ -383,16 +320,6 @@ function buildProviderRequest(
   }
 
   if (config.providerId === "openai" || config.providerId === "custom") {
-    if (referenceImages.length && !supportsOpenAIReferenceImages(config.imageModel)) {
-      throw new ServiceError(
-        "当前生图模型不支持产品参考图，请改用 GPT Image 模型或火山方舟 Seedream。",
-        {
-          statusCode: 400,
-          code: "IMAGE_REFERENCE_UNSUPPORTED"
-        }
-      );
-    }
-
     if (referenceImages.length) {
       return {
         path: "/images/edits",
@@ -482,16 +409,6 @@ function mapUpstreamFailure(
   });
 }
 
-function detectBase64MimeType(value: string) {
-  const mimeType = inferBase64MimeType(value);
-  if (mimeType) return mimeType;
-
-  throw new ServiceError("生图接口返回了不支持的图片格式。", {
-    statusCode: 502,
-    code: "IMAGE_FORMAT_UNSUPPORTED"
-  });
-}
-
 function parseSizeMetadata(value?: string): ImageDimensions | null {
   if (!value) return null;
 
@@ -515,185 +432,229 @@ function parseSizeMetadata(value?: string): ImageDimensions | null {
   return { width, height };
 }
 
-function readJpegDimensions(buffer: Buffer): ImageDimensions | null {
-  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
-
-  let offset = 2;
-  while (offset + 8 < buffer.length) {
-    if (buffer[offset] !== 0xff) {
-      offset += 1;
-      continue;
-    }
-
-    while (offset < buffer.length && buffer[offset] === 0xff) offset += 1;
-    const marker = buffer[offset];
-    offset += 1;
-
-    if (marker === 0xd8 || marker === 0xd9) continue;
-    if (marker === 0xda || offset + 2 > buffer.length) break;
-
-    const segmentLength = buffer.readUInt16BE(offset);
-    if (segmentLength < 2 || offset + segmentLength > buffer.length) break;
-
-    const isStartOfFrame =
-      marker >= 0xc0 &&
-      marker <= 0xcf &&
-      marker !== 0xc4 &&
-      marker !== 0xc8 &&
-      marker !== 0xcc;
-    if (isStartOfFrame && segmentLength >= 7) {
-      return {
-        height: buffer.readUInt16BE(offset + 3),
-        width: buffer.readUInt16BE(offset + 5)
-      };
-    }
-
-    offset += segmentLength;
-  }
-
-  return null;
+function imageResponseError(message: string, code: string) {
+  return new ServiceError(message, {
+    statusCode: 502,
+    code
+  });
 }
 
-function readWebpDimensions(buffer: Buffer): ImageDimensions | null {
-  if (
-    buffer.length < 30 ||
-    buffer.toString("ascii", 0, 4) !== "RIFF" ||
-    buffer.toString("ascii", 8, 12) !== "WEBP"
-  ) {
-    return null;
-  }
-
-  const chunkType = buffer.toString("ascii", 12, 16);
-  if (chunkType === "VP8X") {
-    return {
-      width: 1 + buffer.readUIntLE(24, 3),
-      height: 1 + buffer.readUIntLE(27, 3)
-    };
-  }
-
-  if (
-    chunkType === "VP8 " &&
-    buffer[23] === 0x9d &&
-    buffer[24] === 0x01 &&
-    buffer[25] === 0x2a
-  ) {
-    return {
-      width: buffer.readUInt16LE(26) & 0x3fff,
-      height: buffer.readUInt16LE(28) & 0x3fff
-    };
-  }
-
-  if (chunkType === "VP8L" && buffer[20] === 0x2f) {
-    const bits = buffer.readUInt32LE(21);
-    return {
-      width: 1 + (bits & 0x3fff),
-      height: 1 + ((bits >>> 14) & 0x3fff)
-    };
-  }
-
-  return null;
+function sameDimensions(left: ImageDimensions, right: ImageDimensions) {
+  return left.width === right.width && left.height === right.height;
 }
 
-function readBase64Dimensions(value: string, mimeType: string): ImageDimensions {
-  const buffer = Buffer.from(value, "base64");
-  let dimensions: ImageDimensions | null = null;
+function orientedDimensions(metadata: Metadata): ImageDimensions {
+  const width = metadata.width ?? 0;
+  const height = metadata.height ?? 0;
+  const swapsAxes =
+    metadata.orientation !== undefined &&
+    metadata.orientation >= 5 &&
+    metadata.orientation <= 8;
 
-  if (mimeType === "image/png" && buffer.length >= 24) {
-    dimensions = {
-      width: buffer.readUInt32BE(16),
-      height: buffer.readUInt32BE(20)
-    };
-  } else if (mimeType === "image/jpeg") {
-    dimensions = readJpegDimensions(buffer);
-  } else if (mimeType === "image/webp") {
-    dimensions = readWebpDimensions(buffer);
+  return swapsAxes
+    ? { width: height, height: width }
+    : { width, height };
+}
+
+function deliveryDimensions(config: ResolvedImageConfig): ImageDimensions {
+  return config.providerId === "volcengine"
+    ? PROVIDER_SOURCE_SIZES.volcengine
+    : OPENAI_CROPPED_SIZE;
+}
+
+function retainedFractionForCover(
+  source: ImageDimensions,
+  target: ImageDimensions
+) {
+  const sourceRatio = source.width / source.height;
+  const targetRatio = target.width / target.height;
+  return sourceRatio >= targetRatio
+    ? targetRatio / sourceRatio
+    : sourceRatio / targetRatio;
+}
+
+function validateGeneratedMetadata(
+  metadata: Metadata,
+  config: ResolvedImageConfig,
+  reportedSize?: string
+) {
+  const dimensions = orientedDimensions(metadata);
+  if (!SUPPORTED_OUTPUT_FORMATS.has(metadata.format ?? "")) {
+    throw imageResponseError(
+      "生图接口返回了不支持的图片格式。",
+      "IMAGE_FORMAT_UNSUPPORTED"
+    );
+  }
+  if ((metadata.pages ?? 1) > 1) {
+    throw imageResponseError(
+      "生图接口返回了多帧图片，已阻止展示。",
+      "IMAGE_RESULT_MULTIFRAME"
+    );
+  }
+  if (
+    !dimensions.width ||
+    !dimensions.height ||
+    dimensions.width > MAX_GENERATED_IMAGE_EDGE ||
+    dimensions.height > MAX_GENERATED_IMAGE_EDGE ||
+    dimensions.width * dimensions.height > MAX_GENERATED_IMAGE_PIXELS
+  ) {
+    throw imageResponseError(
+      "生成图片超过最大边长 8000px 或 2400 万像素，已阻止解码。",
+      "IMAGE_RESULT_DIMENSIONS_EXCEEDED"
+    );
   }
 
-  if (!dimensions?.width || !dimensions.height) {
-    throw new ServiceError("无法读取生成图片的实际尺寸。", {
-      statusCode: 502,
-      code: "IMAGE_SIZE_INVALID"
-    });
+  const requestedDimensions = PROVIDER_SOURCE_SIZES[config.providerId];
+  if (
+    config.providerId !== "custom" &&
+    !sameDimensions(dimensions, requestedDimensions)
+  ) {
+    throw imageResponseError(
+      `生图接口返回 ${dimensions.width}x${dimensions.height}，预期为 ${requestedDimensions.width}x${requestedDimensions.height}，已阻止展示。`,
+      "IMAGE_SIZE_MISMATCH"
+    );
+  }
+
+  if (config.providerId === "custom") {
+    const target = deliveryDimensions(config);
+    if (
+      dimensions.width < target.width ||
+      dimensions.height < target.height
+    ) {
+      throw imageResponseError(
+        `生图接口返回 ${dimensions.width}x${dimensions.height}，低于交付所需的 ${target.width}x${target.height}，已阻止放大展示。`,
+        "IMAGE_SIZE_MISMATCH"
+      );
+    }
+    if (
+      retainedFractionForCover(dimensions, target) <
+      MIN_GENERATED_IMAGE_RETAINED_FRACTION
+    ) {
+      throw imageResponseError(
+        `生图接口返回 ${dimensions.width}x${dimensions.height}，画面比例偏差过大，已阻止过度裁切。`,
+        "IMAGE_SIZE_MISMATCH"
+      );
+    }
+  }
+
+  const reportedDimensions = parseSizeMetadata(reportedSize);
+  if (
+    reportedDimensions &&
+    !sameDimensions(reportedDimensions, dimensions) &&
+    !sameDimensions(reportedDimensions, requestedDimensions)
+  ) {
+    throw imageResponseError(
+      "生图接口返回的尺寸元数据既不匹配实际图片，也不匹配本次请求。",
+      "IMAGE_SIZE_MISMATCH"
+    );
   }
 
   return dimensions;
 }
 
-function verifyImageDimensions(
-  dimensions: ImageDimensions
+async function sanitizeGeneratedImage(
+  value: string,
+  config: ResolvedImageConfig,
+  reportedSize?: string
 ) {
-  const expectedRatio = 9 / 16;
-  const actualRatio = dimensions.width / dimensions.height;
-  const relativeError = Math.abs(actualRatio - expectedRatio) / expectedRatio;
+  if (
+    value.length > MAX_BASE64_LENGTH ||
+    value.length % 4 !== 0 ||
+    !BASE64_PATTERN.test(value)
+  ) {
+    throw imageResponseError(
+      "生成图片编码无效或体积过大，请降低分辨率后重试。",
+      "IMAGE_RESULT_TOO_LARGE"
+    );
+  }
 
-  if (relativeError > MAX_ASPECT_RATIO_RELATIVE_ERROR) {
-    throw new ServiceError(
-      `生图接口返回 ${dimensions.width}x${dimensions.height}，不符合 9:16 画幅要求，已阻止展示。`,
-      {
-        statusCode: 502,
-        code: "IMAGE_ASPECT_RATIO_MISMATCH"
-      }
+  const input = Buffer.from(value, "base64");
+  let metadata: Metadata;
+  try {
+    metadata = await sharp(input, {
+      failOn: "error",
+      limitInputPixels: false,
+      sequentialRead: true
+    }).metadata();
+  } catch {
+    throw imageResponseError(
+      "生成图片无法安全解码，可能已损坏。",
+      "IMAGE_RESULT_DECODE_FAILED"
+    );
+  }
+
+  validateGeneratedMetadata(metadata, config, reportedSize);
+  const targetDimensions = deliveryDimensions(config);
+
+  try {
+    const pipeline = sharp(input, {
+      failOn: "error",
+      limitInputPixels: MAX_GENERATED_IMAGE_PIXELS,
+      sequentialRead: true
+    })
+      .rotate()
+      .resize({
+        width: targetDimensions.width,
+        height: targetDimensions.height,
+        fit: "cover",
+        position: "centre",
+        withoutEnlargement: true
+      })
+      .toColourspace("srgb");
+
+    const result = await pipeline
+      .webp({
+        quality: 92,
+        alphaQuality: 100,
+        smartSubsample: true,
+        effort: 4
+      })
+      .toBuffer({ resolveWithObject: true });
+
+    if (
+      result.info.width !== targetDimensions.width ||
+      result.info.height !== targetDimensions.height
+    ) {
+      throw imageResponseError(
+        "生成图片服务端标准化后的尺寸不正确，已阻止展示。",
+        "IMAGE_SIZE_MISMATCH"
+      );
+    }
+
+    return {
+      dataUrl: `data:image/webp;base64,${result.data.toString("base64")}`,
+      mimeType: "image/webp",
+      dimensions: targetDimensions
+    };
+  } catch (error) {
+    if (error instanceof ServiceError) throw error;
+    throw imageResponseError(
+      "生成图片未能通过完整解码与隐私清洗，已阻止展示。",
+      "IMAGE_RESULT_DECODE_FAILED"
     );
   }
 }
 
-function verifiedOutputDimensions(
-  reportedSize: string | undefined,
-  actualDimensions: ImageDimensions | null
-) {
-  const reportedDimensions = parseSizeMetadata(reportedSize);
-
-  if (
-    reportedDimensions &&
-    actualDimensions &&
-    (reportedDimensions.width !== actualDimensions.width ||
-      reportedDimensions.height !== actualDimensions.height)
-  ) {
-    throw new ServiceError("生图接口返回的尺寸元数据与实际图片不一致。", {
-      statusCode: 502,
-      code: "IMAGE_SIZE_MISMATCH"
-    });
-  }
-
-  const dimensions = actualDimensions ?? reportedDimensions;
-  if (!dimensions) {
-    throw new ServiceError("生图接口未返回可校验的尺寸信息。", {
-      statusCode: 502,
-      code: "IMAGE_SIZE_MISSING"
-    });
-  }
-
-  verifyImageDimensions(dimensions);
-  return dimensions;
-}
-
-function parseGeneratedImage(
+async function parseGeneratedImage(
   payload: UpstreamImagePayload,
   config: ResolvedImageConfig,
   referenceImagesUsed: number
-): GeneratedImageAsset {
+): Promise<GeneratedImageAsset> {
   const image = payload.data?.[0];
 
   if (image?.b64_json) {
-    if (image.b64_json.length > MAX_BASE64_LENGTH) {
-      throw new ServiceError("生成图片体积过大，请降低分辨率后重试。", {
-        statusCode: 502,
-        code: "IMAGE_RESULT_TOO_LARGE"
-      });
-    }
-
-    const mimeType = detectBase64MimeType(image.b64_json);
-    const dimensions = verifiedOutputDimensions(
-      image.size || payload.size,
-      readBase64Dimensions(image.b64_json, mimeType)
+    const sanitized = await sanitizeGeneratedImage(
+      image.b64_json,
+      config,
+      image.size || payload.size
     );
     return {
-      imageUrl: `data:${mimeType};base64,${image.b64_json}`,
-      mimeType,
+      imageUrl: sanitized.dataUrl,
+      mimeType: sanitized.mimeType,
       model: payload.model || config.imageModel,
-      size: `${dimensions.width}x${dimensions.height}`,
-      width: dimensions.width,
-      height: dimensions.height,
+      size: `${sanitized.dimensions.width}x${sanitized.dimensions.height}`,
+      width: sanitized.dimensions.width,
+      height: sanitized.dimensions.height,
       referenceImagesUsed,
       revisedPrompt: image.revised_prompt,
       createdAt: new Date().toISOString()
@@ -716,10 +677,141 @@ function parseGeneratedImage(
   });
 }
 
+async function readUpstreamImagePayload(response: Response) {
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength && /^\d+$/.test(declaredLength)) {
+    const bytes = Number.parseInt(declaredLength, 10);
+    if (bytes > MAX_UPSTREAM_JSON_BYTES) {
+      throw imageResponseError(
+        "生图接口响应超过 32MiB 安全上限，已停止读取。",
+        "IMAGE_RESPONSE_TOO_LARGE"
+      );
+    }
+  }
+
+  if (!response.body) {
+    throw imageResponseError(
+      "生图接口返回了空响应。",
+      "IMAGE_RESPONSE_INVALID"
+    );
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      totalBytes += result.value.byteLength;
+      if (totalBytes > MAX_UPSTREAM_JSON_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw imageResponseError(
+          "生图接口响应超过 32MiB 安全上限，已停止读取。",
+          "IMAGE_RESPONSE_TOO_LARGE"
+        );
+      }
+      chunks.push(result.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(
+      Buffer.concat(
+        chunks.map((chunk) =>
+          Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+        ),
+        totalBytes
+      )
+    );
+  } catch {
+    throw imageResponseError(
+      "生图接口响应不是有效的 UTF-8 JSON。",
+      "IMAGE_RESPONSE_INVALID"
+    );
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(decoded);
+  } catch {
+    throw imageResponseError(
+      "生图接口响应不是有效 JSON。",
+      "IMAGE_RESPONSE_INVALID"
+    );
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw imageResponseError(
+      "生图接口响应结构不正确。",
+      "IMAGE_RESPONSE_INVALID"
+    );
+  }
+
+  return payload as UpstreamImagePayload;
+}
+
+function testConfig(
+  providerId: ResolvedImageConfig["providerId"],
+  imageModel = "test-image-model"
+): ResolvedImageConfig {
+  return {
+    providerId,
+    apiKey: "",
+    baseURL: "",
+    imageModel
+  };
+}
+
+export const __imageGenerationTestUtils = {
+  maxUpstreamJsonBytes: MAX_UPSTREAM_JSON_BYTES,
+  buildImagePrompt(prompt: string, negativePrompt = "") {
+    return buildImagePrompt({
+      prompt,
+      negativePrompt,
+      imageType: "detail_page"
+    });
+  },
+  buildProviderRequest(
+    providerId: ResolvedImageConfig["providerId"],
+    referenceImages: readonly string[] = [],
+    imageModel?: string
+  ) {
+    const config = testConfig(providerId, imageModel);
+    const size = resolveRequestedSize(config);
+    return {
+      size,
+      request: buildProviderRequest(config, "test prompt", size, referenceImages)
+    };
+  },
+  readUpstreamImagePayload,
+  parseGeneratedImage(
+    payload: UpstreamImagePayload,
+    providerId: ResolvedImageConfig["providerId"],
+    imageModel?: string
+  ) {
+    return parseGeneratedImage(payload, testConfig(providerId, imageModel), 1);
+  },
+  applyProviderFraming(
+    providerId: ResolvedImageConfig["providerId"],
+    prompt = "test prompt"
+  ) {
+    return applyProviderFraming(prompt, providerId);
+  }
+} as const;
+
 export async function generateImageFromPrompt(
   input: GenerateImageFromPromptInput
 ): Promise<GeneratedImageAsset> {
-  const referenceImages = normalizeReferenceImages(input.referenceImages);
+  if (input.signal?.aborted) {
+    throw new ServiceError("生图请求已中断。", {
+      statusCode: 499,
+      code: "IMAGE_GENERATION_ABORTED"
+    });
+  }
+  const referenceImages = await normalizeReferenceImages(input.referenceImages);
 
   if (!referenceImages.length) {
     throw new ServiceError("缺少产品参考图，已阻止纯文本生图以避免产品外观漂移。", {
@@ -728,9 +820,11 @@ export async function generateImageFromPrompt(
     });
   }
 
-  const prompt = buildImagePrompt({ ...input, referenceImages });
-
   const config = resolveImageApiConfig(input.imageProviderConfig);
+  const prompt = applyProviderFraming(
+    buildImagePrompt({ ...input, referenceImages }),
+    config.providerId
+  );
   const size = resolveRequestedSize(config);
   const providerRequest = buildProviderRequest(
     config,
@@ -744,7 +838,17 @@ export async function generateImageFromPrompt(
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), IMAGE_REQUEST_TIMEOUT_MS);
+  let timedOut = false;
+  const abortFromCaller = () => controller.abort();
+  if (input.signal?.aborted) {
+    controller.abort();
+  } else {
+    input.signal?.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, IMAGE_REQUEST_TIMEOUT_MS);
 
   try {
     const response = await fetch(`${config.baseURL}${providerRequest.path}`, {
@@ -763,15 +867,29 @@ export async function generateImageFromPrompt(
           : providerRequest.body,
       signal: controller.signal
     });
-    const payload = (await response.json().catch(() => null)) as UpstreamImagePayload | null;
+    let payload: UpstreamImagePayload;
+    try {
+      payload = await readUpstreamImagePayload(response);
+    } catch (error) {
+      if (
+        !response.ok &&
+        error instanceof ServiceError &&
+        error.code === "IMAGE_RESPONSE_INVALID"
+      ) {
+        throw mapUpstreamFailure(response.status, undefined, {
+          hasReferenceImages: referenceImages.length > 0
+        });
+      }
+      throw error;
+    }
 
-    if (!response.ok || !payload) {
+    if (!response.ok) {
       throw mapUpstreamFailure(response.status, payload?.error?.code, {
         hasReferenceImages: referenceImages.length > 0
       });
     }
 
-    return parseGeneratedImage(
+    return await parseGeneratedImage(
       payload,
       config,
       referenceImages.length
@@ -779,7 +897,16 @@ export async function generateImageFromPrompt(
   } catch (error) {
     if (error instanceof ServiceError) throw error;
 
-    if (error instanceof DOMException && error.name === "AbortError") {
+    if (
+      (error instanceof DOMException && error.name === "AbortError") ||
+      (error instanceof Error && error.name === "AbortError")
+    ) {
+      if (input.signal?.aborted && !timedOut) {
+        throw new ServiceError("生图请求已中断。", {
+          statusCode: 499,
+          code: "IMAGE_GENERATION_ABORTED"
+        });
+      }
       throw new ServiceError("生图请求超时，请稍后重试。", {
         statusCode: 504,
         code: "IMAGE_GENERATION_TIMEOUT"
@@ -792,5 +919,6 @@ export async function generateImageFromPrompt(
     });
   } finally {
     clearTimeout(timeoutId);
+    input.signal?.removeEventListener("abort", abortFromCaller);
   }
 }
