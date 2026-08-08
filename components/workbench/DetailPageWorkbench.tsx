@@ -17,6 +17,14 @@ import {
   completedWorkflowStages
 } from "@/lib/skill-suite/workflow";
 import { useSkillSuiteStore } from "@/lib/skill-suite/store";
+import {
+  loadProject,
+  clearProject,
+  restoreAssets,
+  projectHasRecoverableData,
+  type PersistedProject
+} from "@/lib/persistence";
+import { useAutoSave } from "@/lib/hooks/useAutoSave";
 import type {
   DetailPlan,
   GeneratedImageAsset,
@@ -230,6 +238,42 @@ export function DetailPageWorkbench() {
     },
     []
   );
+
+  // ── 持久化恢复 ──────────────────────────────────────────────
+  const [restored, setRestored] = useState(false);
+  useEffect(() => {
+    if (restored) return;
+    let cancelled = false;
+    loadProject().then((saved: PersistedProject | undefined) => {
+      if (cancelled || !saved) return;
+      if (!projectHasRecoverableData(saved)) return;
+      const assets = restoreAssets(saved);
+      store.restoreProject(
+        {
+          id: saved.id,
+          name: saved.name,
+          assets,
+          brief: saved.brief,
+          research: saved.research,
+          plan: saved.plan,
+          executions: saved.executions,
+          qa: saved.qa,
+          updatedAt: saved.savedAt
+        },
+        saved.stage
+      );
+      setSelectedAssetIds(assets.map((a) => a.id));
+    }).catch(() => {
+      // IndexedDB 不可用：静默跳过
+    }).finally(() => {
+      if (!cancelled) setRestored(true);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restored]);
+
+  // ── 自动保存 ──────────────────────────────────────────────
+  useAutoSave();
 
   function beginRun(label?: string): RunHandle {
     workAbortRef.current?.abort();
@@ -688,6 +732,7 @@ export function DetailPageWorkbench() {
     researchCheckpointRef.current = null;
     planningDraftRef.current = null;
     store.resetProject();
+    clearProject().catch(() => {});
     setSelectedAssetIds([]);
     setGeneratedImages({});
     imageRequestIdsRef.current = {};

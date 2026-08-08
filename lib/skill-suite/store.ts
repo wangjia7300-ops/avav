@@ -68,6 +68,8 @@ type SkillSuiteStore = {
     error?: WorkErrorInfo | null
   ) => void;
   resetProject: () => void;
+  /** 从持久化数据恢复项目（替换当前空项目） */
+  restoreProject: (project: DetailPageProject, stage: WorkflowStage) => void;
 };
 
 function now() {
@@ -257,6 +259,19 @@ export const useSkillSuiteStore = create<SkillSuiteStore>((set) => ({
       executionStatuses: {},
       workStatus: "idle",
       workLabel: "",
+      error: null,
+      runEpoch: state.runEpoch + 1
+    })),
+
+  restoreProject: (project, stage) =>
+    set((state) => ({
+      project,
+      stage,
+      selectedScreenId: "screen-01",
+      executionMode: "E",
+      executionStatuses: {},
+      workStatus: "idle",
+      workLabel: "已恢复上次项目",
       error: null,
       runEpoch: state.runEpoch + 1
     }))
