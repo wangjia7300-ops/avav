@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1",
-    "build": "next build",
+    "build": "NODE_OPTIONS=\"${NODE_OPTIONS//--use-system-ca/}\" next build",
     "start": "next start --hostname 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ext .ts,.tsx --max-warnings=0",
