@@ -1,23 +1,12 @@
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { ServiceError } from "@/lib/services/errors";
+import { expectServiceError } from "@/tests/helpers";
 import {
   __imageGenerationTestUtils,
   generateImageFromPrompt
 } from "@/lib/services/generate-image-from-prompt";
 
-async function expectServiceError(
-  action: () => Promise<unknown>,
-  code: string
-) {
-  const caught = await action().then(
-    () => null,
-    (error: unknown) => error
-  );
-  expect(caught).toBeInstanceOf(ServiceError);
-  expect((caught as ServiceError).code).toBe(code);
-  return caught as ServiceError;
-}
+// 共享的 expectServiceError 从 ../helpers 导入
 
 function asFormData(body: Record<string, unknown> | FormData) {
   expect(body).toBeInstanceOf(FormData);

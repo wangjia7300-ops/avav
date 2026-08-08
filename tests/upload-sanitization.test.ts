@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { ServiceError } from "@/lib/services/errors";
+import { expectServiceError } from "@/tests/helpers";
 import {
   sanitizeDataImages,
   sanitizeUploadedAssets
@@ -10,19 +10,7 @@ function dataUrl(mimeType: string, buffer: Buffer) {
   return `data:${mimeType};base64,${buffer.toString("base64")}`;
 }
 
-async function expectServiceError(
-  action: () => Promise<unknown>,
-  code: string
-) {
-  let caught: unknown;
-  try {
-    await action();
-  } catch (error) {
-    caught = error;
-  }
-  expect(caught).toBeInstanceOf(ServiceError);
-  expect((caught as ServiceError).code).toBe(code);
-}
+// 共享的 expectServiceError 从 ../helpers 导入
 
 async function uniquePngDataUrls(count: number) {
   return Promise.all(

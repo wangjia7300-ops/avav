@@ -13,7 +13,7 @@ import {
   isNonPublicIPv4,
   isPrivateEndpointHostname
 } from "@/lib/services/endpoint-guard";
-import { ServiceError } from "@/lib/services/errors";
+import { expectServiceError } from "@/tests/helpers";
 import type { AIProviderConfig, AIProviderId } from "@/lib/types";
 
 // node:dns/promises 的 lookup 是重载函数，vi.mocked 只会取到单地址重载；
@@ -35,17 +35,7 @@ function chatConfig(overrides: Partial<AIProviderConfig> = {}): AIProviderConfig
   };
 }
 
-async function expectServiceError(promise: Promise<unknown>, code: string) {
-  const thrown = await promise.then(
-    () => null,
-    (error: unknown) => error
-  );
-  expect(thrown).toBeInstanceOf(ServiceError);
-  const serviceError = thrown as ServiceError;
-  expect(serviceError.code).toBe(code);
-  expect(serviceError.statusCode).toBe(400);
-  return serviceError;
-}
+// 共享的 expectServiceError 从 ../helpers 导入，此处不再重复定义。
 
 beforeEach(() => {
   mockedLookup.mockReset();
