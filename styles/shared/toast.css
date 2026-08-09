@@ -1,0 +1,104 @@
+.workbench-toast {
+  position: fixed;
+  z-index: 80;
+  right: 22px;
+  bottom: 22px;
+  max-width: 460px;
+  gap: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: white;
+  padding: 12px 14px;
+  box-shadow: 0 14px 42px rgba(33, 29, 24, 0.14);
+}
+
+.workbench-toast.error {
+  border-color: #e8b4ad;
+  color: var(--red);
+}
+
+.workbench-toast.success {
+  border-color: #a8d2bf;
+  color: var(--green);
+}
+
+.workbench-toast.running {
+  border-color: #9eb9ef;
+  color: var(--blue);
+}
+
+.workbench-toast strong {
+  display: block;
+  font-size: 11px;
+}
+
+.workbench-toast p {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.workbench-toast .workbench-recovery-note {
+  margin-top: 5px;
+  color: var(--ink-soft);
+}
+
+.workbench-toast .workbench-cost-note {
+  margin-top: 5px;
+  color: #9a5a1f;
+  font-size: 9px;
+}
+
+.workbench-technical-details {
+  margin-top: 6px;
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
+.workbench-technical-details summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.workbench-toast .workbench-retry-button {
+  min-height: 30px;
+  margin-top: 9px;
+  border: 1px solid var(--red);
+  border-radius: 5px;
+  background: var(--red);
+  padding: 0 12px;
+  color: white;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.workbench-toast .workbench-retry-button:hover {
+  background: #b73229;
+}
+
+.workbench-toast > button {
+  border: 0;
+  background: transparent;
+}
+
+.workbench-toast > .workbench-cancel-button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #dfafa8;
+  border-radius: 5px;
+  background: #fff5f3;
+  padding: 0 10px;
+  color: var(--red);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.workbench-toast > .workbench-cancel-button:hover {
+  border-color: var(--red);
+  background: #fdeae7;
+}

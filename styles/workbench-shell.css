@@ -1,0 +1,198 @@
+.workbench-shell {
+  min-width: 1180px;
+  min-height: 100dvh;
+  overflow: hidden;
+  background: var(--surface-soft);
+}
+
+.workbench-header {
+  position: relative;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: 280px minmax(560px, 1fr) 300px;
+  align-items: center;
+  height: 64px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.98);
+  padding: 0 20px;
+}
+
+.workbench-brand,
+.header-actions,
+.workflow-nav,
+.workflow-step,
+.workbench-toast,
+.source-stamp,
+.screen-plan-row > span,
+.quiet-note {
+  display: flex;
+  align-items: center;
+}
+
+.workbench-brand {
+  gap: 11px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--ink);
+  border-radius: 5px;
+  background: var(--ink);
+  color: white;
+}
+
+.brand-title,
+.brand-subtitle,
+.eyebrow,
+.document-titlebar p,
+.qa-titlebar p,
+.preview-note,
+.quiet-note,
+.qa-summary {
+  margin: 0;
+}
+
+.brand-title {
+  font-size: 16px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.brand-subtitle {
+  margin-top: 1px;
+  color: var(--ink-soft);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+.workflow-nav {
+  justify-content: center;
+  min-width: 0;
+}
+
+.workflow-nav-item {
+  display: flex;
+  align-items: center;
+}
+
+.workflow-connector {
+  width: clamp(22px, 3vw, 64px);
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.workflow-step {
+  min-width: 92px;
+  height: 46px;
+  gap: 9px;
+  border: 0;
+  background: transparent;
+  padding: 4px 7px;
+  text-align: left;
+}
+
+.workflow-step-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: white;
+}
+
+.workflow-step b {
+  display: block;
+  font-size: 13px;
+}
+
+.workflow-step small {
+  display: block;
+  margin-top: 1px;
+  color: #8a8f96;
+  font-size: 9px;
+}
+
+.workflow-step.is-active {
+  color: var(--orange);
+}
+
+.workflow-step.is-active .workflow-step-icon {
+  border-color: var(--orange);
+  background: var(--orange);
+  color: white;
+}
+
+.workflow-step.is-complete .workflow-step-icon {
+  border-color: #77917f;
+  color: var(--green);
+}
+
+.header-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.header-config-button,
+.secondary-action,
+.primary-action,
+.image-action,
+.qa-next-action,
+.publish-action,
+.rail-secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  border-radius: 5px;
+  padding: 0 15px;
+  font-weight: 650;
+  transition: border-color 150ms ease, background 150ms ease, color 150ms ease;
+}
+
+.header-config-button {
+  min-height: 38px;
+  border: 1px solid var(--line-strong);
+  background: white;
+  font-size: 12px;
+}
+
+.header-config-button:hover,
+.secondary-action:hover,
+.rail-secondary-button:hover {
+  border-color: #a9a096;
+  background: #faf8f5;
+}
+
+.workbench-main {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  height: calc(100dvh - 64px);
+}
+
+.workbench-content {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--surface-soft);
+}
+
+/* 配置弹窗主按钮（Tailwind 体系内的补充语义类） */
+.ai-gradient-button {
+  background-image: linear-gradient(135deg, #e36a25, #d8493f);
+  color: #fff;
+  border: 0;
+}
+
+.ai-gradient-button:hover {
+  opacity: 0.92;
+}
+
+/* 预览文案副标题（语义类，样式与 .preview-copy p 一致，供后续单独调整） */
+.preview-subheadline {
+  margin: 0;
+}
