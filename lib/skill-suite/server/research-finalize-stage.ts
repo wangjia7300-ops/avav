@@ -93,7 +93,9 @@ export async function runResearchFinalizeStage(
           signal,
           onResponseMetadata: (metadata) => {
             responseMetadata = metadata;
-          }
+          },
+          costStage: "research",
+          costOperation: "图研汇总"
         }
       );
       return parseResearchFinalizeSelection(text, observationIds, profile);

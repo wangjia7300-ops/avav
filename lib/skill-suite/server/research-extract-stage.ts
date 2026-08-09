@@ -119,7 +119,10 @@ export async function runResearchExtractStage(
             signal,
             onResponseMetadata: (metadata) => {
               responseMetadata = metadata;
-            }
+            },
+            costStage: "research",
+            costOperation: "图研提取",
+            costImageCount: sanitizedAssets.length
           }
         );
         return {

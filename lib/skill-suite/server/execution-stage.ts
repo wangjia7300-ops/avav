@@ -49,7 +49,7 @@ export async function runExecutionStage(
     providerConfig,
     textMessages(prompt),
     9000,
-    { signal }
+    { signal, costStage: "execution", costOperation: "执行生成" }
   );
   let parsed = extractJsonObject<unknown>(text);
   let drafts;
@@ -82,7 +82,7 @@ export async function runExecutionStage(
         providerConfig,
         textMessages(repairPrompt),
         9_000,
-        { signal }
+        { signal, costStage: "execution", costOperation: "执行修复" }
       );
       parsed = extractJsonObject<unknown>(repairedText);
     }

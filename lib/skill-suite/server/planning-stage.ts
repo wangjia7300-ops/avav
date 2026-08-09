@@ -125,7 +125,9 @@ async function completePlanningProviderCall(input: {
         input.maxTokens,
         {
           timeoutMs: planningTimeoutMs(input.deadlineAt),
-          signal: input.signal
+          signal: input.signal,
+          costStage: "planning",
+          costOperation: "策划生成"
         }
       );
       return {
@@ -381,7 +383,9 @@ async function repairPlanningScreen(input: {
             strict: true
           },
           timeoutMs,
-          signal: input.signal
+          signal: input.signal,
+          costStage: "planning",
+          costOperation: "策划修复"
         }
       );
       const repairPayload = extractJsonObject<unknown>(repairedText);

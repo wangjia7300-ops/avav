@@ -184,7 +184,7 @@ export async function runQAStage(
       providerConfig,
       textMessages(prompt),
       6500,
-      { signal }
+      { signal, costStage: "qa", costOperation: "语义质检" }
     );
     const candidate = extractJsonObject<unknown>(text);
     assertQAModelResponse(candidate);

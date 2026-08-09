@@ -1,6 +1,7 @@
 import type OpenAI from "openai";
 import type { ChatCompletionParams } from "@/lib/ai-providers";
 import { createAIChatCompletion } from "@/lib/services/openai-client";
+import { logCost } from "@/lib/cost-tracker";
 import type { AIProviderConfig } from "@/lib/types";
 
 export function textMessages(
@@ -26,10 +27,18 @@ export async function complete(
   options: Pick<
     ChatCompletionParams,
     "jsonSchema" | "onResponseMetadata" | "signal"
-  > & { timeoutMs?: number } = {}
+  > & {
+    timeoutMs?: number;
+    /** 成本追踪：阶段标识 */
+    costStage?: string;
+    /** 成本追踪：操作描述 */
+    costOperation?: string;
+    /** 成本追踪：输入图片数量 */
+    costImageCount?: number;
+  } = {}
 ) {
-  const { timeoutMs = 240_000, ...completionOptions } = options;
-  return createAIChatCompletion(providerConfig, {
+  const { timeoutMs = 240_000, costStage, costOperation, costImageCount, ...completionOptions } = options;
+  const result = await createAIChatCompletion(providerConfig, {
     model: providerConfig.model,
     messages,
     maxTokens,
@@ -37,6 +46,21 @@ export async function complete(
     maxTransportRetries: 1,
     ...completionOptions
   });
+
+  // 记录成本
+  if (costStage) {
+    logCost({
+      stage: costStage,
+      operation: costOperation ?? costStage,
+      model: providerConfig.model,
+      providerId: providerConfig.providerId,
+      inputText: JSON.stringify(messages),
+      outputText: result,
+      imageCount: costImageCount
+    });
+  }
+
+  return result;
 }
 
 export function ensureModelMetadata<T extends object>(value: T) {
