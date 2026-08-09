@@ -280,12 +280,11 @@ test.describe("四阶段工作流（API Mock）", () => {
       await route.fulfill({
         status: 422,
         json: {
-          error: {
-            code: "RESEARCH_SCHEMA_INVALID",
-            message: "图研结果结构不合格",
-            details: ["facts 数组为空"],
-            retryable: true
-          }
+          success: false,
+          error: "图研结果结构不合格",
+          code: "RESEARCH_SCHEMA_INVALID",
+          details: ["facts 数组为空"],
+          meta: { retryable: true }
         }
       });
     });

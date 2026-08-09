@@ -12,7 +12,7 @@ describe("本机服务安全配置", () => {
     expect(packageJson.scripts.start).toContain("--hostname 127.0.0.1");
   });
 
-  it("配置基础安全响应头且本机 HTTP 不启用 HSTS", () => {
+  it("配置完整安全响应头（含 HSTS，仅 HTTPS 生效）", () => {
     const config = readFileSync(
       resolve(process.cwd(), "next.config.mjs"),
       "utf8"
@@ -25,6 +25,6 @@ describe("本机服务安全配置", () => {
     expect(config).toContain("frame-ancestors 'none'");
     expect(config).toContain("X-Content-Type-Options");
     expect(config).toContain("Cross-Origin-Opener-Policy");
-    expect(config).not.toContain("Strict-Transport-Security");
+    expect(config).toContain("Strict-Transport-Security");
   });
 });
