@@ -318,4 +318,137 @@ describe("research extract/finalize service operations", () => {
       code: "RESEARCH_FINALIZE_SELECTION_INVALID"
     });
   });
+
+  it("finalize首轮产生跨范围冲突时会自动修复：列出冲突观察 + 重新选择，并通过", async () => {
+    const assetIds = ["asset-01", "asset-02", "asset-03"];
+    // 8 条观察：前 6 条合规，后 2 条带"塑料"材质信号触发 CROSS_FIELD_CONFLICT。
+    const fusedIndexes = [6, 7];
+    // 显式构造 8 个观察ID，与 8 条提取观察一一对应
+    const allObsIds = [
+      "obs:asset-01:1",
+      "obs:asset-02:1",
+      "obs:asset-03:1",
+      "obs:asset-01:2",
+      "obs:asset-02:2",
+      "obs:asset-03:2",
+      "obs:asset-01:3",
+      "obs:asset-02:3"
+    ];
+    const safeIds = allObsIds.slice(0, 6);
+
+    function fusedPayload() {
+      return {
+        selectedObservationIds: allObsIds,
+        productName: "跨范围冲突测试",
+        category: "收纳容器",
+        brand: "未识别",
+        summary: "首轮跨范围冲突，需要修复。",
+        visualAudit: auditKeys.map((key) => ({
+          key,
+          title: `${key}维度`,
+          finding: `${key}的发现`,
+          recommendation: `${key}的建议`
+        })),
+        visualKeywords: ["测试", "修复", "跨范围"],
+        risks: []
+      };
+    }
+
+    const fusedExtraction = JSON.stringify({
+      observations: Array.from({ length: 8 }, (_, index) => {
+        const assetId = assetIds[index % assetIds.length];
+        const isFused = fusedIndexes.includes(index);
+        return {
+          assetId,
+          label: `事实${index + 1}`,
+          value: isFused
+            ? `${assetId}的塑料外观描述`
+            : `${assetId}的可见特征${index + 1}`,
+          evidence: `${assetId}的直接证据${index + 1}`,
+          sourceType: "visual_observation",
+          claimScope: "appearance",
+          entityType: "product",
+          confidence: 0.95
+        };
+      })
+    });
+
+    // 修复阶段：剔除冲突的 2 条，返回剩余 6 条合规观察
+    const repairSelection = { selectedObservationIds: safeIds };
+
+    vi.mocked(complete)
+      .mockResolvedValueOnce(fusedExtraction)
+      .mockResolvedValueOnce(JSON.stringify(fusedPayload()))
+      .mockResolvedValueOnce(JSON.stringify(repairSelection));
+
+    await runResearchExtractStage(extractRequest(assetIds), providerConfig);
+    const result = await runResearchFinalizeStage(
+      finalizeRequest(assetIds),
+      providerConfig
+    );
+
+    // 第一次：提取；第二次：失败汇总；第三次：修复。
+    expect(complete).toHaveBeenCalledTimes(3);
+
+    // 验证修复后的 research 只包含合规的观察
+    expect(result.data.facts.length).toBe(6);
+    const allValues = result.data.facts.map((fact) => fact.value);
+    fusedIndexes.forEach((i) => {
+      const assetId = assetIds[i % assetIds.length];
+      const fusedValue = `${assetId}的塑料外观描述`;
+      expect(allValues).not.toContain(fusedValue);
+    });
+  });
+
+  it("finalize修复预算耗尽后抛出RESEARCH_REPAIR_NOT_CONVERGING", async () => {
+    const assetIds = ["asset-01", "asset-02", "asset-03"];
+    // 6 条观察，全部带"塑料"材质信号，跨范围冲突无法通过排除解决
+    const fusedExtraction = JSON.stringify({
+      observations: Array.from({ length: 6 }, (_, index) => {
+        const assetId = assetIds[index % assetIds.length];
+        return {
+          assetId,
+          label: `事实${index + 1}`,
+          value: `${assetId}的塑料外观描述${index + 1}`,
+          evidence: `${assetId}的材质证据${index + 1}`,
+          sourceType: "visual_observation",
+          claimScope: "appearance",
+          entityType: "product",
+          confidence: 0.95
+        };
+      })
+    });
+
+    const allObsIds = observationIds(assetIds);
+    const fusedPayload = (selected: readonly string[]): string =>
+      JSON.stringify({
+        selectedObservationIds: selected,
+        productName: "全跨范围冲突",
+        category: "测试",
+        brand: "未识别",
+        summary: "全部都是跨范围冲突。",
+        visualAudit: auditKeys.map((key) => ({
+          key,
+          title: `${key}维度`,
+          finding: `${key}的发现`,
+          recommendation: `${key}的建议`
+        })),
+        visualKeywords: ["测试", "修复", "冲突"],
+        risks: []
+      });
+
+    vi.mocked(complete)
+      .mockResolvedValueOnce(fusedExtraction)
+      .mockResolvedValueOnce(fusedPayload(allObsIds))
+      .mockResolvedValueOnce(fusedPayload(allObsIds))
+      .mockResolvedValueOnce(fusedPayload(allObsIds));
+
+    await runResearchExtractStage(extractRequest(assetIds), providerConfig);
+
+    await expect(
+      runResearchFinalizeStage(finalizeRequest(assetIds), providerConfig)
+    ).rejects.toMatchObject({
+      code: "RESEARCH_REPAIR_NOT_CONVERGING"
+    });
+  });
 });

@@ -1,18 +1,29 @@
 import {
   buildProductResearchFromSelection,
+  buildResearchFinalizeRepairSchema,
   buildResearchFinalizeSchema,
-  parseResearchFinalizeSelection
+  parseResearchFinalizeRepairSelection,
+  parseResearchFinalizeSelection,
+  type ResearchFinalizeSelection
 } from "@/lib/skill-suite/research-atomic-contract";
-import { buildResearchFinalizeSelectionPrompt } from "@/lib/skill-suite/research-atomic-prompts";
+import {
+  buildResearchFinalizeRepairPrompt,
+  buildResearchFinalizeSelectionPrompt
+} from "@/lib/skill-suite/research-atomic-prompts";
 import { authorizeUploadedImageFacts } from "@/lib/skill-suite/evidence-policy";
+import {
+  collectCrossFieldConflictObservationIds,
+  collectResearchStructureIssues
+} from "@/lib/skill-suite/research-normalization";
 import {
   getResearchRunProgress,
   runResearchFinalOnce,
   validateExistingResearchRun
 } from "@/lib/skill-suite/server/research-run-registry";
-import { assertResearch } from "@/lib/skill-suite/validation";
+import { assertResearch, SkillSuiteValidationError } from "@/lib/skill-suite/validation";
 import { ServiceError } from "@/lib/services/errors";
-import type { AIProviderConfig } from "@/lib/types";
+import type { AIProviderConfig, ProductResearch } from "@/lib/types";
+import type { AtomicResearchObservation } from "@/lib/skill-suite/research-atomic-contract";
 import { complete } from "./shared";
 import type { ResearchFinalizeRequest } from "./request";
 import { researchProviderFingerprint } from "./research-run-identity";
@@ -20,6 +31,8 @@ import { researchProviderFingerprint } from "./research-run-identity";
 const FINALIZE_TIMEOUT_MS = 120_000;
 const FINALIZE_MAX_TOKENS = 6_000;
 const FINALIZE_COMPACT_MAX_TOKENS = 4_000;
+const FINALIZE_REPAIR_MAX_TOKENS = 2_000;
+const FINALIZE_REPAIR_MAX_ATTEMPTS = 2;
 
 function isTruncatedResponse(error: unknown): error is ServiceError {
   return (
@@ -145,16 +158,126 @@ export async function runResearchFinalizeStage(
       ...selection,
       brand: visibleBrand?.value ?? "未识别"
     };
-    const assembled = buildProductResearchFromSelection(
-      lockedSelection,
-      observations
-    );
-    const authorized = authorizeUploadedImageFacts(
-      assembled,
-      body.assetIds
-    );
-    assertResearch(authorized);
-    return authorized;
+    const assembleAuthorized = (
+      selection: ResearchFinalizeSelection
+    ): ProductResearch => {
+      const assembled = buildProductResearchFromSelection(selection, observations);
+      return authorizeUploadedImageFacts(assembled, body.assetIds);
+    };
+    let currentAssembled = assembleAuthorized(lockedSelection);
+
+    // ── 跨范围冲突自动修复循环 ─────────────────────────────────
+    // 首次汇总失败时，识别有冲突的观察 ID，要求模型重新选择。
+    // 对应策划阶段的修复循环：识别冲突 → 排除 → 重新选择。
+    let repairedAttempts = 0;
+    let currentSelection: ResearchFinalizeSelection = lockedSelection;
+    let currentSelectedObservations: AtomicResearchObservation[] =
+      selectedObservations.filter(
+        (observation): observation is AtomicResearchObservation =>
+          Boolean(observation)
+      );
+    let currentIssues = collectResearchStructureIssues(currentAssembled, {
+      allowedAssetIds: body.assetIds
+    }).filter((issue) => issue.code === "CROSS_FIELD_CONFLICT");
+    while (
+      currentIssues.length > 0 &&
+      repairedAttempts < FINALIZE_REPAIR_MAX_ATTEMPTS &&
+      !signal?.aborted
+    ) {
+      repairedAttempts += 1;
+      const conflictObservationIds = collectCrossFieldConflictObservationIds(
+        currentSelectedObservations
+      );
+      if (conflictObservationIds.length === 0) {
+        // 校验报错但没法定位到具体观察；放弃修复以免浪费调用。
+        break;
+      }
+      const allowedAfterExclude = observationIds.filter(
+        (id) => !conflictObservationIds.includes(id)
+      );
+      if (allowedAfterExclude.length < 6) {
+        // 排除后可选项已不足 6 条，修复无意义。
+        break;
+      }
+      const conflictReason = currentIssues
+        .slice(0, 3)
+        .map((issue) => issue.message)
+        .join("；");
+      const repairText = await complete(
+        providerConfig,
+        [
+          {
+            role: "system",
+            content:
+              "你是电商详情页的图片研究汇总修复模块。只返回 selectedObservationIds，禁止返回其他字段。"
+          },
+          {
+            role: "user",
+            content: buildResearchFinalizeRepairPrompt({
+              excludeObservationIds: conflictObservationIds,
+              conflictReason,
+              previousSelectedObservationIds:
+                currentSelection.selectedObservationIds,
+              observations
+            })
+          }
+        ],
+        FINALIZE_REPAIR_MAX_TOKENS,
+        {
+          jsonSchema: {
+            name: "product_research_finalize_repair_selection",
+            schema: buildResearchFinalizeRepairSchema(allowedAfterExclude),
+            strict: true
+          },
+          timeoutMs: FINALIZE_TIMEOUT_MS,
+          signal,
+          onResponseMetadata: (metadata) => {
+            responseMetadata = metadata;
+          },
+          costStage: "research",
+          costOperation: "图研汇总修复"
+        }
+      );
+      const newSelectedIds = parseResearchFinalizeRepairSelection(
+        repairText,
+        allowedAfterExclude
+      );
+      currentSelection = { ...currentSelection, selectedObservationIds: newSelectedIds };
+      currentSelectedObservations = newSelectedIds
+        .map((id) => selectedById.get(id))
+        .filter((observation): observation is AtomicResearchObservation =>
+          Boolean(observation)
+        );
+      currentAssembled = assembleAuthorized(currentSelection);
+      currentIssues = collectResearchStructureIssues(currentAssembled, {
+        allowedAssetIds: body.assetIds
+      }).filter((issue) => issue.code === "CROSS_FIELD_CONFLICT");
+    }
+
+    // 超过修复预算仍冲突 → 转为带详细信息的研究错误。
+    if (currentIssues.length > 0) {
+      throw new SkillSuiteValidationError(
+        "图研汇总跨范围冲突已修复多次仍不收敛，已保留已通过的观察。",
+        "RESEARCH_REPAIR_NOT_CONVERGING",
+        currentIssues.map(
+          (issue) => `${issue.path} [${issue.code}] ${issue.message}`
+        ),
+        [],
+        {
+          stage: "research_finalize",
+          completedBatchIds: before.completedBatchIndexes.map(
+            (index) => `batch-${index + 1}`
+          ),
+          retryable: true,
+          attempt: 1 + repairedAttempts,
+          maxAttempts: 1 + FINALIZE_REPAIR_MAX_ATTEMPTS,
+          repairExhausted: true
+        }
+      );
+    }
+
+    assertResearch(currentAssembled);
+    return currentAssembled;
   });
 
   return {

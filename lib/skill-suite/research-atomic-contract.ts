@@ -6,7 +6,6 @@ import type {
   VisualAuditDimension
 } from "@/lib/types";
 import {
-  assertResearch,
   extractJsonObject,
   SkillSuiteValidationError
 } from "@/lib/skill-suite/validation";
@@ -459,6 +458,87 @@ export function buildResearchFinalizeSchema(
   };
 }
 
+/**
+ * 汇总修复 schema：仅要求 selectedObservationIds。
+ * 修复时只重新选择观察，不重新生成 productName / category / summary 等。
+ */
+export function buildResearchFinalizeRepairSchema(
+  allowedObservationIds: readonly string[],
+  profile: AtomicResearchOutputProfile = "standard"
+): Record<string, unknown> {
+  if (
+    allowedObservationIds.length < 6 ||
+    allowedObservationIds.some((id) => !nonEmptyString(id, 240)) ||
+    new Set(allowedObservationIds).size !== allowedObservationIds.length
+  ) {
+    invalidSelection(["修复可选原子观察ID必须非空且唯一，并至少有6条。"]);
+  }
+  const limits = getResearchFinalizeLimits(profile);
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["selectedObservationIds"],
+    properties: {
+      selectedObservationIds: {
+        type: "array",
+        minItems: 6,
+        maxItems: limits.selectedMaxItems,
+        uniqueItems: true,
+        items: {
+          type: "string",
+          minLength: 1,
+          maxLength: 240
+        }
+      }
+    }
+  };
+}
+
+/**
+ * 解析修复阶段的模型输出。失败抛错（由调用方捕获）。
+ */
+export function parseResearchFinalizeRepairSelection(
+  text: string,
+  allowedObservationIds: readonly string[]
+): string[] {
+  const parsed = extractJsonObject<unknown>(text);
+  if (!isRecord(parsed)) {
+    invalidSelection(["修复阶段必须返回 JSON 对象。"]);
+  }
+  const allowedFields = new Set(["selectedObservationIds"]);
+  if (
+    !hasOnlyFields(parsed, allowedFields) ||
+    !("selectedObservationIds" in parsed)
+  ) {
+    invalidSelection(["修复阶段只能返回 selectedObservationIds。"]);
+  }
+  const allowed = new Set(allowedObservationIds);
+  // 显式从已校验的 parsed 上读取，避免未知下标路径上的 unknown 残留。
+  const rawSelected: unknown = (parsed as Record<string, unknown>)[
+    "selectedObservationIds"
+  ];
+  const isArray = Array.isArray(rawSelected);
+  const selected = isArray
+    ? (rawSelected as unknown[]).filter(
+        (item): item is string => typeof item === "string"
+      )
+    : [];
+  const issues: string[] = [];
+  if (
+    !isArray ||
+    selected.length < 6 ||
+    selected.length !== rawSelected.length ||
+    new Set(selected).size !== selected.length ||
+    selected.some((id) => !allowed.has(id))
+  ) {
+    issues.push(
+      "修复阶段 selectedObservationIds 必须为6–8条且全部来自允许列表。"
+    );
+  }
+  if (issues.length) invalidSelection(issues);
+  return selected;
+}
+
 function parseAudit(
   value: unknown,
   issues: string[],
@@ -654,6 +734,5 @@ export function buildProductResearchFromSelection(
     source: "model",
     generatedAt: options.generatedAt ?? new Date().toISOString()
   };
-  assertResearch(research);
   return research;
 }

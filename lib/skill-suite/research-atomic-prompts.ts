@@ -56,3 +56,30 @@ export function buildResearchFinalizeSelectionPrompt(input: {
     JSON_ONLY
   ].join("\n\n");
 }
+
+/**
+ * 汇总阶段的修复提示。
+ * 当检测出 CROSS_FIELD_CONFLICT 等结构问题时，列出有问题的观察 ID，
+ * 要求模型排除这些观察，重新选择 6–8 条单范围、合规的事实。
+ * 仅修改 selectedObservationIds；其他字段保前次结果。
+ */
+export function buildResearchFinalizeRepairPrompt(input: {
+  excludeObservationIds: readonly string[];
+  conflictReason: string;
+  previousSelectedObservationIds: readonly string[];
+  observations: readonly AtomicResearchObservation[];
+}) {
+  const excluded = new Set(input.excludeObservationIds);
+  const safeObservations = input.observations.filter(
+    (observation) => !excluded.has(observation.observationId)
+  );
+  return [
+    "你是电商详情页的图片研究汇总修复模块。上一轮选择触发了生产结构校验失败，必须重新选择。",
+    `失败原因：${input.conflictReason}`,
+    `必须排除的观察 ID（违反 claimScope 单范围规则，禁止再次选择）：${input.excludeObservationIds.join("、")}`,
+    `本次可重新选择的观察：${JSON.stringify(safeObservations)}`,
+    "重新选择 6–8 条单范围、合规的 selectedObservationIds；其他字段（productName/category/brand/summary/visualAudit/visualKeywords/risks）保留上一轮结果。",
+    "禁止从排除列表中复活观察；禁止把跨范围语义硬塞进同一条事实。",
+    JSON_ONLY
+  ].join("\n\n");
+}

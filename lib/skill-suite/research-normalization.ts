@@ -756,4 +756,22 @@ export function buildResearchRepairIssueList(
   );
 }
 
+/**
+ * 在已锁定的原子观察中，识别会触发 CROSS_FIELD_CONFLICT 的 observationId。
+ * 用于图研汇总阶段：检测到冲突后，可让模型在重试时排除这些观察。
+ */
+export function collectCrossFieldConflictObservationIds(
+  observations: readonly unknown[]
+): string[] {
+  const result: string[] = [];
+  for (const observation of observations) {
+    if (!isRecord(observation)) continue;
+    const observationId = observation.observationId;
+    if (!isNonEmptyString(observationId)) continue;
+    const hits = collectScopeConflictHits(observation);
+    if (hits && hits.length > 0) result.push(observationId);
+  }
+  return result;
+}
+
 export { RESEARCH_AUDIT_KEYS };
