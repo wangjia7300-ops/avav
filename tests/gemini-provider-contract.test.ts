@@ -1,22 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const geminiSdk = vi.hoisted(() => ({
-  interactionsCreate: vi.fn(),
-  clientOptions: [] as Array<{ apiKey?: string }>
-}));
-
-vi.mock("@google/genai", () => ({
-  GoogleGenAI: class GoogleGenAIMock {
-    interactions = {
-      create: (...args: unknown[]) => geminiSdk.interactionsCreate(...args)
-    };
-
-    constructor(options: { apiKey?: string }) {
-      geminiSdk.clientOptions.push(options);
-    }
-  }
-}));
-
 import {
   createChatCompletion,
   PRESET_PROVIDERS
@@ -33,6 +15,12 @@ import type {
 const GEMINI_PROVIDER_ID = "gemini" as AIProviderId;
 const GEMINI_NATIVE_BASE_URL =
   "https://generativelanguage.googleapis.com/v1beta";
+const originalGeminiProxyUrl = process.env.GEMINI_PROXY_URL;
+type FetchLike = (
+  input: RequestInfo | URL,
+  init?: RequestInit
+) => Promise<Response>;
+type FetchMock = ReturnType<typeof vi.fn<FetchLike>>;
 
 function geminiConfig(): AIProviderConfig {
   return {
@@ -41,6 +29,29 @@ function geminiConfig(): AIProviderConfig {
     baseURL: GEMINI_NATIVE_BASE_URL,
     model: "gemini-3.6-flash"
   };
+}
+
+function successResponse(
+  text = '{"category":"拖把","visibleFact":"灰白双槽桶"}',
+  finishReason = "STOP"
+) {
+  return new Response(
+    JSON.stringify({
+      candidates: [
+        {
+          finishReason,
+          content: { parts: [{ text }] }
+        }
+      ],
+      modelVersion: "gemini-3.6-flash"
+    }),
+    { status: 200, headers: { "content-type": "application/json" } }
+  );
+}
+
+function requestBody(fetchMock: FetchMock) {
+  const options = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+  return JSON.parse(String(options?.body ?? "{}")) as Record<string, unknown>;
 }
 
 const responseSchema = {
@@ -53,24 +64,38 @@ const responseSchema = {
   required: ["category", "visibleFact"]
 };
 
-describe("Google Gemini native Interactions provider contract", () => {
+describe("Google Gemini native generateContent provider contract", () => {
   beforeEach(() => {
-    geminiSdk.interactionsCreate.mockReset();
-    geminiSdk.clientOptions.length = 0;
-    // 当前生产代码尚未实现 Gemini 原生适配器时，阻止它误走旧的
-    // OpenAI-compatible 网络路径；真正的外部系统边界由上面的
-    // @google/genai mock 提供。
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("unexpected legacy provider transport");
-      })
-    );
+    delete process.env.GEMINI_PROXY_URL;
   });
 
   afterEach(() => {
+    if (originalGeminiProxyUrl === undefined) {
+      delete process.env.GEMINI_PROXY_URL;
+    } else {
+      process.env.GEMINI_PROXY_URL = originalGeminiProxyUrl;
+    }
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("服务端配置 Gemini 代理时把代理 dispatcher 交给 generateContent 请求", async () => {
+    process.env.GEMINI_PROXY_URL = "http://127.0.0.1:10808";
+    const fetchMock = vi.fn<FetchLike>(async () => successResponse("OK"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createChatCompletion(geminiConfig(), {
+      model: "gemini-3.6-flash",
+      messages: [{ role: "user", content: "测试连接" }],
+      maxTokens: 20,
+      timeoutMs: 20_000,
+      maxTransportRetries: 0
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      dispatcher: expect.anything()
+    });
   });
 
   it("供应商列表提供可直接填写 Key 的 Gemini 原生视觉模型配置", () => {
@@ -85,26 +110,23 @@ describe("Google Gemini native Interactions provider contract", () => {
       requiresAuth: true,
       visionSupport: "supported"
     });
-    expect(preset?.models.length).toBeGreaterThan(0);
+    expect(preset?.models[0]).toBe("gemini-flash-latest");
 
     const draft = createProviderDraft(GEMINI_PROVIDER_ID);
     expect(draft).toEqual({
       providerId: "gemini",
       apiKey: "",
       baseURL: GEMINI_NATIVE_BASE_URL,
-      model: preset?.models[0]
+      model: "gemini-flash-latest"
     });
     expect(
       isProviderConfigComplete({ ...draft, apiKey: "session-only-key" })
     ).toBe(true);
   });
 
-  it("通过统一 provider seam 把 system 指令、文字与 base64 产品图转换为原生 Interaction", async () => {
-    geminiSdk.interactionsCreate.mockResolvedValueOnce({
-      id: "interaction-1",
-      status: "completed",
-      output_text: '{"category":"拖把","visibleFact":"灰白双槽桶"}'
-    });
+  it("通过统一 provider seam 把 system 指令、文字与 base64 产品图转换为 generateContent", async () => {
+    const fetchMock = vi.fn<FetchLike>(async () => successResponse());
+    vi.stubGlobal("fetch", fetchMock);
 
     const result = await createChatCompletion(geminiConfig(), {
       model: "gemini-3.6-flash",
@@ -132,38 +154,41 @@ describe("Google Gemini native Interactions provider contract", () => {
     expect(result.text).toBe(
       '{"category":"拖把","visibleFact":"灰白双槽桶"}'
     );
-    expect(geminiSdk.clientOptions).toEqual([
-      { apiKey: "gemini-test-secret" }
-    ]);
-    const [payload, options] = geminiSdk.interactionsCreate.mock.calls[0];
-    expect(payload).toEqual({
-      model: "gemini-3.6-flash",
-      stream: false,
-      store: false,
-      system_instruction: "只提取图片中可见事实。",
-      input: [
-        { type: "text", text: "研究这张产品图" },
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `${GEMINI_NATIVE_BASE_URL}/models/gemini-3.6-flash:generateContent`
+    );
+    expect(requestBody(fetchMock)).toEqual({
+      contents: [
         {
-          type: "image",
-          data: "ZmFrZQ==",
-          mime_type: "image/webp"
+          role: "user",
+          parts: [
+            { text: "研究这张产品图" },
+            {
+              inlineData: {
+                mimeType: "image/webp",
+                data: "ZmFrZQ=="
+              }
+            }
+          ]
         }
       ],
-      generation_config: {
-        max_output_tokens: 1_200
+      systemInstruction: {
+        parts: [{ text: "只提取图片中可见事实。" }]
+      },
+      generationConfig: {
+        maxOutputTokens: 1_200,
+        thinkingConfig: { thinkingLevel: "minimal" }
       }
     });
-    expect(options).toMatchObject({ maxRetries: 0 });
-    expect(options.timeout).toBeGreaterThanOrEqual(19_000);
-    expect(options.timeout).toBeLessThanOrEqual(20_000);
+    const headers = new Headers(
+      (fetchMock.mock.calls[0]?.[1] as RequestInit).headers
+    );
+    expect(headers.get("x-goog-api-key")).toBe("gemini-test-secret");
   });
 
-  it("Gemini 结构化输出使用原生 response_format JSON Schema", async () => {
-    geminiSdk.interactionsCreate.mockResolvedValueOnce({
-      id: "interaction-2",
-      status: "completed",
-      output_text: '{"category":"拖把","visibleFact":"灰白双槽桶"}'
-    });
+  it("Gemini 结构化输出使用原生 responseJsonSchema", async () => {
+    const fetchMock = vi.fn<FetchLike>(async () => successResponse());
+    vi.stubGlobal("fetch", fetchMock);
 
     await createChatCompletion(geminiConfig(), {
       model: "gemini-3.6-flash",
@@ -178,31 +203,21 @@ describe("Google Gemini native Interactions provider contract", () => {
       maxTransportRetries: 0
     });
 
-    expect(geminiSdk.interactionsCreate).toHaveBeenCalledWith({
-      model: "gemini-3.6-flash",
-      stream: false,
-      store: false,
-      input: [{ type: "text", text: "返回产品事实 JSON" }],
-      response_format: {
-        type: "text",
-        mime_type: "application/json",
-        schema: responseSchema
-      },
-      generation_config: {
-        max_output_tokens: 800
+    expect(requestBody(fetchMock)).toMatchObject({
+      generationConfig: {
+        maxOutputTokens: 800,
+        thinkingConfig: { thinkingLevel: "minimal" },
+        responseMimeType: "application/json",
+        responseJsonSchema: responseSchema
       }
-    }, {
-      timeout: 20_000,
-      maxRetries: 0
     });
   });
 
-  it("只有 completed 终态才接受文本，incomplete 半截 JSON 必须丢弃", async () => {
-    geminiSdk.interactionsCreate.mockResolvedValueOnce({
-      id: "interaction-incomplete",
-      status: "incomplete",
-      output_text: '{"category":"拖把"'
-    });
+  it("只有 STOP 终态才接受文本，MAX_TOKENS 半截 JSON 必须丢弃", async () => {
+    const fetchMock = vi.fn<FetchLike>(async () =>
+      successResponse('{"category":"拖把"', "MAX_TOKENS")
+    );
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(
       createChatCompletion(geminiConfig(), {
@@ -218,12 +233,9 @@ describe("Google Gemini native Interactions provider contract", () => {
     });
   });
 
-  it("上传的 https 参考图使用原生 uri，取消信号透传给 SDK", async () => {
-    geminiSdk.interactionsCreate.mockResolvedValueOnce({
-      id: "interaction-remote-image",
-      status: "completed",
-      output_text: "ok"
-    });
+  it("上传的 https 参考图使用 fileData，取消信号通过隔离信号传给 fetch", async () => {
+    const fetchMock = vi.fn<FetchLike>(async () => successResponse("ok"));
+    vi.stubGlobal("fetch", fetchMock);
     const controller = new AbortController();
 
     await createChatCompletion(geminiConfig(), {
@@ -244,62 +256,52 @@ describe("Google Gemini native Interactions provider contract", () => {
       maxTransportRetries: 0
     });
 
-    expect(geminiSdk.interactionsCreate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        store: false,
-        input: [
-          {
-            type: "image",
-            uri: "https://assets.example.com/product.jpg"
-          }
-        ]
-      }),
-      expect.objectContaining({
-        maxRetries: 0,
-        fetchOptions: { signal: expect.anything() }
-      })
-    );
-    const requestOptions = geminiSdk.interactionsCreate.mock.calls[0]?.[1] as {
-      timeout?: number;
-      fetchOptions?: { signal?: AbortSignal };
-    };
-    expect(requestOptions.timeout).toBeGreaterThanOrEqual(19_900);
-    expect(requestOptions.timeout).toBeLessThanOrEqual(20_000);
-    expect(requestOptions.fetchOptions?.signal).not.toBe(controller.signal);
-    expect(requestOptions.fetchOptions?.signal?.aborted).toBe(false);
+    expect(requestBody(fetchMock)).toMatchObject({
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              fileData: {
+                mimeType: "image/jpeg",
+                fileUri: "https://assets.example.com/product.jpg"
+              }
+            }
+          ]
+        }
+      ]
+    });
+    const requestOptions = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(requestOptions.signal).not.toBe(controller.signal);
+    expect(requestOptions.signal?.aborted).toBe(false);
     controller.abort();
-    expect(requestOptions.fetchOptions?.signal?.aborted).toBe(false);
+    expect(requestOptions.signal?.aborted).toBe(false);
   });
 
-  it("即使存在父取消信号，Gemini 请求仍会在 timeoutMs 截止时取消", async () => {
+  it("即使存在父取消信号，请求仍会在 timeoutMs 截止时取消", async () => {
     vi.useFakeTimers();
     const parentController = new AbortController();
-    let sdkSignal: AbortSignal | undefined;
-
-    geminiSdk.interactionsCreate.mockImplementationOnce(
-      (_request: unknown, options: unknown) => {
-        sdkSignal = (
-          options as { fetchOptions?: { signal?: AbortSignal } }
-        ).fetchOptions?.signal;
-
-        return new Promise((_resolve, reject) => {
-          if (!sdkSignal) return;
-          const rejectAborted = () => {
-            reject(
-              sdkSignal?.reason ??
-                Object.assign(new Error("The operation was aborted."), {
-                  name: "AbortError"
-                })
-            );
-          };
-          if (sdkSignal.aborted) {
-            rejectAborted();
-            return;
-          }
-          sdkSignal.addEventListener("abort", rejectAborted, { once: true });
-        });
-      }
-    );
+    let requestSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn<FetchLike>((_url, options) => {
+      requestSignal = options?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        if (!requestSignal) return;
+        const rejectAborted = () => {
+          reject(
+            requestSignal?.reason ??
+              Object.assign(new Error("The operation was aborted."), {
+                name: "AbortError"
+              })
+          );
+        };
+        if (requestSignal.aborted) {
+          rejectAborted();
+          return;
+        }
+        requestSignal.addEventListener("abort", rejectAborted, { once: true });
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     const completion = createChatCompletion(geminiConfig(), {
       model: "gemini-3.6-flash",
@@ -314,9 +316,9 @@ describe("Google Gemini native Interactions provider contract", () => {
     );
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(geminiSdk.interactionsCreate).toHaveBeenCalledTimes(1);
-    expect(sdkSignal).toBeDefined();
-    expect(sdkSignal).not.toBe(parentController.signal);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestSignal).toBeDefined();
+    expect(requestSignal).not.toBe(parentController.signal);
 
     await vi.advanceTimersByTimeAsync(10_000);
     const caught = await outcome;
@@ -326,17 +328,15 @@ describe("Google Gemini native Interactions provider contract", () => {
       statusCode: 504
     });
     expect(parentController.signal.aborted).toBe(false);
-    expect(sdkSignal?.aborted).toBe(true);
-    expect(geminiSdk.interactionsCreate).toHaveBeenCalledTimes(1);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("Gemini 付费请求不在统一传输层静默重放", async () => {
-    geminiSdk.interactionsCreate.mockRejectedValue(
-      Object.assign(new Error("gateway timeout"), {
-        name: "ApiError",
-        status: 504
-      })
+    const fetchMock = vi.fn<FetchLike>(async () =>
+      new Response(null, { status: 504 })
     );
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(
       createChatCompletion(geminiConfig(), {
@@ -348,16 +348,19 @@ describe("Google Gemini native Interactions provider contract", () => {
       })
     ).rejects.toMatchObject({ code: "AI_PROVIDER_TIMEOUT" });
 
-    expect(geminiSdk.interactionsCreate).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("Gemini SDK 鉴权失败映射为统一安全错误且不会泄露 API Key", async () => {
-    geminiSdk.interactionsCreate.mockRejectedValueOnce(
-      Object.assign(new Error("API key rejected: gemini-test-secret"), {
-        name: "ApiError",
-        status: 401
-      })
+  it("Gemini 鉴权失败映射为统一安全错误且不会泄露 API Key", async () => {
+    const fetchMock = vi.fn<FetchLike>(async () =>
+      new Response(
+        JSON.stringify({
+          error: { message: "API key rejected: gemini-test-secret" }
+        }),
+        { status: 401 }
+      )
     );
+    vi.stubGlobal("fetch", fetchMock);
 
     let caught: unknown;
     await createChatCompletion(geminiConfig(), {
@@ -380,8 +383,6 @@ describe("Google Gemini native Interactions provider contract", () => {
       details?: unknown;
       cause?: unknown;
     };
-    // Error.message 默认不可枚举，单独 JSON.stringify(error) 无法证明
-    // 供应商原始报错中的密钥已经被净化。逐个检查所有可暴露表面。
     expect(safeError.message).not.toContain("gemini-test-secret");
     expect(safeError.code).not.toContain("gemini-test-secret");
     expect(JSON.stringify(safeError.details ?? null)).not.toContain(

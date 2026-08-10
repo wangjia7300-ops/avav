@@ -28,7 +28,7 @@ export type ProviderPreset = {
 };
 
 const VOLCENGINE_ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
-const GEMINI_INTERACTIONS_BASE_URL =
+const GEMINI_GENERATE_CONTENT_BASE_URL =
   "https://generativelanguage.googleapis.com/v1beta";
 const ARK_ENDPOINT_ID_PATTERN = /^ep-[a-z0-9-]+$/i;
 
@@ -56,11 +56,16 @@ export const PRESET_PROVIDERS: ProviderPreset[] = [
   {
     id: "gemini",
     name: "Google Gemini",
-    baseURL: GEMINI_INTERACTIONS_BASE_URL,
-    models: ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"],
+    baseURL: GEMINI_GENERATE_CONTENT_BASE_URL,
+    models: [
+      "gemini-flash-latest",
+      "gemini-3.6-flash",
+      "gemini-3.5-flash",
+      "gemini-3.5-flash-lite"
+    ],
     requiresAuth: true,
     description:
-      "Gemini 原生 Interactions API，支持多图理解与 JSON Schema 结构化输出。",
+      "Gemini 原生 generateContent API，支持多图理解与 JSON Schema 结构化输出。",
     visionSupport: "supported",
     visionNote: "支持1–9张产品图片理解"
   },
@@ -115,7 +120,11 @@ export type ChatCompletionParams = {
 };
 
 export type ChatCompletionResponseMetadata = {
-  api: "chat_completions" | "responses" | "anthropic" | "gemini_interactions";
+  api:
+    | "chat_completions"
+    | "responses"
+    | "anthropic"
+    | "gemini_generate_content";
   status?: string;
   finishReason?: string;
   incompleteReason?: string;
@@ -407,7 +416,7 @@ function getSafeProviderFailure(
 
   if (isProviderTimeout(error)) {
     return new ServiceError(
-      `${providerName} 暂时响应较慢。本次未写入不完整结果，已完成资料仍保留，可重试当前阶段。`,
+      `${providerName} 暂时响应较慢，请稍后重试。`,
       {
         statusCode: 504,
         code: "AI_PROVIDER_TIMEOUT",
@@ -1439,10 +1448,10 @@ export async function createChatCompletion(
       }
 
       if (config.providerId === "gemini") {
-        const { geminiInteractionsChat } = await import(
+        const { geminiGenerateContentChat } = await import(
           "@/lib/gemini-provider"
         );
-        return await geminiInteractionsChat(config, attemptParams);
+        return await geminiGenerateContentChat(config, attemptParams);
       }
 
       if (resolveCompatibleConfig(config).useResponsesAPI) {
@@ -1508,8 +1517,8 @@ export async function createChatCompletion(
 
 export function getEnvProviderConfig(): AIProviderConfig | null {
   const arkApiKey = process.env.ARK_API_KEY?.trim();
-  if (arkApiKey) {
-    return {
+  const arkConfig: AIProviderConfig | null = arkApiKey
+    ? {
       providerId: "volcengine",
       apiKey: arkApiKey,
       baseURL:
@@ -1517,28 +1526,40 @@ export function getEnvProviderConfig(): AIProviderConfig | null {
       model:
         process.env.ARK_MODEL?.trim() || "doubao-seed-1-8-251228",
       displayName: "火山方舟 Ark（服务端）"
-    };
-  }
+      }
+    : null;
 
   const geminiApiKey = process.env.GEMINI_API_KEY?.trim();
-  if (geminiApiKey) {
-    return {
+  const geminiConfig: AIProviderConfig | null = geminiApiKey
+    ? {
       providerId: "gemini",
       apiKey: geminiApiKey,
-      baseURL: GEMINI_INTERACTIONS_BASE_URL,
-      model: process.env.GEMINI_MODEL?.trim() || "gemini-3.6-flash",
+      baseURL: GEMINI_GENERATE_CONTENT_BASE_URL,
+      model: process.env.GEMINI_MODEL?.trim() || "gemini-flash-latest",
       displayName: "Google Gemini（服务端）"
-    };
-  }
+      }
+    : null;
 
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) return null;
+  const openaiApiKey = process.env.OPENAI_API_KEY?.trim();
+  const openaiConfig: AIProviderConfig | null = openaiApiKey
+    ? {
+        providerId: "openai",
+        apiKey: openaiApiKey,
+        baseURL: "https://api.openai.com/v1",
+        model: process.env.OPENAI_MODEL?.trim() || "gpt-4.1-mini",
+        displayName: "OpenAI（服务端）"
+      }
+    : null;
 
-  return {
-    providerId: "openai",
-    apiKey,
-    baseURL: "https://api.openai.com/v1",
-    model: process.env.OPENAI_MODEL?.trim() || "gpt-4.1-mini",
-    displayName: "OpenAI（服务端）"
-  };
+  const preferredProvider = process.env.AI_PROVIDER?.trim().toLowerCase();
+  const preferredProviderId =
+    preferredProvider === "ark" ? "volcengine" : preferredProvider;
+  const configuredProviders = [arkConfig, geminiConfig, openaiConfig].filter(
+    (config): config is AIProviderConfig => Boolean(config)
+  );
+  const preferredConfig = configuredProviders.find(
+    (config) => config.providerId === preferredProviderId
+  );
+
+  return preferredConfig ?? arkConfig ?? geminiConfig ?? openaiConfig;
 }

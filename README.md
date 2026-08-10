@@ -46,7 +46,7 @@ ARK_MODEL=doubao-seed-1-8-251228
 ## Google Gemini
 
 应用按 [Gemini API 官方快速入门](https://ai.google.dev/gemini-api/docs/get-started?hl=zh-cn)
-使用 `@google/genai` 原生 SDK 的 Interactions API，不经过 OpenAI 兼容转译层。
+使用 Google 官方稳定的 `generateContent` API，不经过 OpenAI 兼容转译层。
 该接入支持文本、产品图片理解与 JSON Schema 结构化输出。
 
 先在 [Google AI Studio](https://aistudio.google.com/app/apikey) 创建 API Key，然后可以
@@ -55,7 +55,7 @@ ARK_MODEL=doubao-seed-1-8-251228
 
 ```bash
 GEMINI_API_KEY=
-GEMINI_MODEL=gemini-3.6-flash
+GEMINI_MODEL=gemini-flash-latest
 ```
 
 浏览器输入的 Gemini API Key 同样只在当前页面内存中使用，不会持久化。

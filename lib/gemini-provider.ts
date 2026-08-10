@@ -1,4 +1,4 @@
-import { GoogleGenAI, type Interactions } from "@google/genai";
+import { ProxyAgent, type Dispatcher } from "undici";
 import type {
   ChatCompletionParams,
   ChatCompletionResponseMetadata
@@ -6,9 +6,35 @@ import type {
 import { ServiceError } from "@/lib/services/errors";
 import type { AIProviderConfig } from "@/lib/types";
 
-type GeminiInteractionResult = {
+type GeminiGenerateContentResult = {
   text: string;
   metadata: ChatCompletionResponseMetadata;
+};
+
+type GeminiFetchOptions = RequestInit & {
+  dispatcher?: Dispatcher;
+};
+
+type GeminiPart =
+  | { text: string }
+  | { inlineData: { mimeType: string; data: string } }
+  | { fileData: { mimeType: string; fileUri: string } };
+
+type GeminiContent = {
+  role: "user" | "model";
+  parts: GeminiPart[];
+};
+
+type GeminiGenerateContentResponse = {
+  candidates?: Array<{
+    finishReason?: string;
+    content?: {
+      parts?: Array<{ text?: string; thought?: boolean }>;
+    };
+  }>;
+  promptFeedback?: { blockReason?: string };
+  modelVersion?: string;
+  responseId?: string;
 };
 
 type MessageContent = ChatCompletionParams["messages"][number]["content"];
@@ -35,15 +61,23 @@ function parseBase64Image(value: string) {
   };
 }
 
-function toGeminiContent(content: MessageContent): Interactions.Content[] {
+function remoteImageMimeType(value: string) {
+  const pathname = new URL(value).pathname.toLowerCase();
+  if (pathname.endsWith(".png")) return "image/png";
+  if (pathname.endsWith(".webp")) return "image/webp";
+  if (pathname.endsWith(".gif")) return "image/gif";
+  return "image/jpeg";
+}
+
+function toGeminiParts(content: MessageContent): GeminiPart[] {
   if (typeof content === "string") {
-    return content.trim() ? [{ type: "text", text: content }] : [];
+    return content.trim() ? [{ text: content }] : [];
   }
   if (!Array.isArray(content)) return [];
 
-  return content.flatMap((part): Interactions.Content[] => {
+  return content.flatMap((part): GeminiPart[] => {
     if (part.type === "text") {
-      return part.text.trim() ? [{ type: "text", text: part.text }] : [];
+      return part.text.trim() ? [{ text: part.text }] : [];
     }
 
     if (part.type !== "image_url") return [];
@@ -56,15 +90,23 @@ function toGeminiContent(content: MessageContent): Interactions.Content[] {
     if (embeddedImage) {
       return [
         {
-          type: "image",
-          data: embeddedImage.data,
-          mime_type: embeddedImage.mimeType
+          inlineData: {
+            mimeType: embeddedImage.mimeType,
+            data: embeddedImage.data
+          }
         }
       ];
     }
 
     if (/^https:\/\//i.test(imageUrl)) {
-      return [{ type: "image", uri: imageUrl }];
+      return [
+        {
+          fileData: {
+            mimeType: remoteImageMimeType(imageUrl),
+            fileUri: imageUrl
+          }
+        }
+      ];
     }
 
     throw new ServiceError(
@@ -77,41 +119,29 @@ function toGeminiContent(content: MessageContent): Interactions.Content[] {
   });
 }
 
-function buildInteractionInput(
+function buildGenerateContentInput(
   messages: ChatCompletionParams["messages"]
-): Interactions.CreateModelInteractionParamsNonStreaming["input"] {
-  const conversationalMessages = messages.filter(
-    (message) => message.role !== "system" && message.role !== "developer"
-  );
-
-  if (
-    conversationalMessages.length === 1 &&
-    conversationalMessages[0].role === "user"
-  ) {
-    const content = toGeminiContent(conversationalMessages[0].content);
-    if (content.length > 0) return content;
-  }
-
-  const turns = conversationalMessages.flatMap((message) => {
+) {
+  const contents = messages.flatMap((message): GeminiContent[] => {
     if (message.role !== "user" && message.role !== "assistant") return [];
-    const content = toGeminiContent(message.content);
-    if (content.length === 0) return [];
+    const parts = toGeminiParts(message.content);
+    if (parts.length === 0) return [];
     return [
       {
         role: message.role === "assistant" ? "model" : "user",
-        content
+        parts
       }
     ];
   });
 
-  if (turns.length === 0) {
+  if (contents.length === 0) {
     throw new ServiceError("Gemini 请求没有可用的文本或图片输入。", {
       statusCode: 400,
       code: "GEMINI_INPUT_EMPTY"
     });
   }
 
-  return turns;
+  return contents;
 }
 
 function notifyMetadata(
@@ -121,52 +151,23 @@ function notifyMetadata(
   try {
     params.onResponseMetadata?.(metadata);
   } catch {
-    // 诊断回调不得影响已成功的供应商请求。
+    // 诊断回调不得影响已经成功的供应商请求。
   }
 }
 
-function assertCompleted(status: string) {
-  if (status === "completed") return;
-
-  if (status === "incomplete") {
-    throw new ServiceError("Gemini 输出未完成，响应已被截断。", {
-      statusCode: 502,
-      code: "AI_RESPONSE_TRUNCATED",
-      details: { normalizedValue: status }
-    });
-  }
-
-  if (status === "budget_exceeded") {
-    throw new ServiceError("Gemini 本次响应超出模型计算预算。", {
-      statusCode: 502,
-      code: "AI_RESPONSE_BUDGET_EXCEEDED",
-      details: { normalizedValue: status }
-    });
-  }
-
-  throw new ServiceError("Gemini 未能完成本次响应。", {
-    statusCode: 502,
-    code: "AI_RESPONSE_INCOMPLETE",
-    details: { normalizedValue: status || "unknown" }
-  });
-}
-
-function combineParentSignalWithDeadline(
-  parentSignal: AbortSignal,
-  timeoutMs: number
-) {
+function createRequestSignal(parentSignal: AbortSignal | undefined, timeoutMs: number) {
   const controller = new AbortController();
   const abortFromParent = () => {
     controller.abort(
-      parentSignal.reason ??
+      parentSignal?.reason ??
         new DOMException("The operation was aborted.", "AbortError")
     );
   };
 
-  if (parentSignal.aborted) {
+  if (parentSignal?.aborted) {
     abortFromParent();
   } else {
-    parentSignal.addEventListener("abort", abortFromParent, { once: true });
+    parentSignal?.addEventListener("abort", abortFromParent, { once: true });
   }
 
   const timeoutId = controller.signal.aborted
@@ -184,22 +185,71 @@ function combineParentSignalWithDeadline(
     signal: controller.signal,
     cleanup() {
       if (timeoutId !== undefined) clearTimeout(timeoutId);
-      parentSignal.removeEventListener("abort", abortFromParent);
+      parentSignal?.removeEventListener("abort", abortFromParent);
     }
   };
 }
 
+function geminiHttpError(status: number) {
+  return Object.assign(new Error(`Gemini API HTTP ${status}`), {
+    name: "GeminiHttpError",
+    status
+  });
+}
+
+function assertCompleteFinishReason(finishReason: string) {
+  if (finishReason === "STOP") return;
+
+  if (finishReason === "MAX_TOKENS") {
+    throw new ServiceError("Gemini 输出达到长度上限，响应已被截断。", {
+      statusCode: 502,
+      code: "AI_RESPONSE_TRUNCATED",
+      details: { normalizedValue: finishReason }
+    });
+  }
+
+  if (finishReason === "SAFETY" || finishReason === "PROHIBITED_CONTENT") {
+    throw new ServiceError("Gemini 因安全策略未返回可用结果。", {
+      statusCode: 422,
+      code: "AI_RESPONSE_BLOCKED",
+      details: { normalizedValue: finishReason }
+    });
+  }
+
+  throw new ServiceError("Gemini 未能完成本次响应。", {
+    statusCode: 502,
+    code: "AI_RESPONSE_INCOMPLETE",
+    details: { normalizedValue: finishReason || "unknown" }
+  });
+}
+
 /**
- * Google 官方原生 Interactions API 适配器。它不依赖 OpenAI
- * 兼容层，因此可以保留 Gemini 的多图输入、原生 JSON
- * Schema 与完整交互状态。
+ * Gemini 官方稳定 generateContent REST 适配器。直接使用原生多图、
+ * systemInstruction 与 responseJsonSchema，不经过 OpenAI 兼容协议；
+ * generateContent 本身无服务端会话存储，客户产品图只存在于本次请求。
  */
-export async function geminiInteractionsChat(
+export async function geminiGenerateContentChat(
   config: AIProviderConfig,
   params: ChatCompletionParams
-): Promise<GeminiInteractionResult> {
-  const client = new GoogleGenAI({ apiKey: config.apiKey });
+): Promise<GeminiGenerateContentResult> {
+  const proxyUrl = process.env.GEMINI_PROXY_URL?.trim();
+  let proxyDispatcher: ProxyAgent | null = null;
+  if (proxyUrl) {
+    try {
+      proxyDispatcher = new ProxyAgent(proxyUrl);
+    } catch {
+      throw new ServiceError("Gemini 代理地址无效，请检查服务端配置。", {
+        statusCode: 500,
+        code: "GEMINI_PROXY_INVALID"
+      });
+    }
+  }
+
   const timeoutMs = params.timeoutMs ?? 180_000;
+  const model = (config.model || params.model || "gemini-flash-latest").trim();
+  const baseURL = (
+    config.baseURL || "https://generativelanguage.googleapis.com/v1beta"
+  ).replace(/\/+$/g, "");
   const systemInstruction = params.messages
     .filter(
       (message) => message.role === "system" || message.role === "developer"
@@ -207,75 +257,85 @@ export async function geminiInteractionsChat(
     .map((message) => contentText(message.content))
     .filter(Boolean)
     .join("\n\n");
-
-  const request: Interactions.CreateModelInteractionParamsNonStreaming = {
-    model: config.model || params.model || "gemini-3.6-flash",
-    stream: false,
-    // Interactions 默认会存储交互。客户产品图不得进入
-    // 长期保留链路，所以所有前台任务强制关闭存储。
-    store: false,
-    ...(systemInstruction
-      ? { system_instruction: systemInstruction }
-      : {}),
-    input: buildInteractionInput(params.messages),
+  const generationConfig = {
+    maxOutputTokens: params.maxTokens ?? 2_000,
+    // latest 别名当前不接受 thinkingBudget=0，但支持 minimal。
+    // 使用最小思考级别，在保留模型兼容性的同时控制延迟与输出预算。
+    thinkingConfig: { thinkingLevel: "minimal" },
     ...(params.jsonSchema
       ? {
-          response_format: {
-            type: "text" as const,
-            mime_type: "application/json" as const,
-            schema: params.jsonSchema.schema
-          }
+          responseMimeType: "application/json",
+          responseJsonSchema: params.jsonSchema.schema
         }
+      : {})
+  };
+  const body = {
+    contents: buildGenerateContentInput(params.messages),
+    ...(systemInstruction
+      ? { systemInstruction: { parts: [{ text: systemInstruction }] } }
       : {}),
-    generation_config: {
-      max_output_tokens: params.maxTokens ?? 2_000
-    }
+    generationConfig
   };
 
-  const combinedSignal = params.signal
-    ? combineParentSignalWithDeadline(params.signal, timeoutMs)
-    : null;
-  let response: Awaited<
-    ReturnType<typeof client.interactions.create>
-  >;
-  try {
-    response = await client.interactions.create(request, {
-      timeout: timeoutMs,
-      maxRetries: 0,
-      ...(combinedSignal
-        ? { fetchOptions: { signal: combinedSignal.signal } }
-        : {})
-    });
-  } finally {
-    combinedSignal?.cleanup();
-  }
-  if (
-    response &&
-    typeof response === "object" &&
-    Symbol.asyncIterator in response
-  ) {
-    throw new ServiceError("Gemini 返回了非预期的流式响应。", {
-      statusCode: 502,
-      code: "AI_RESPONSE_INCOMPLETE"
-    });
-  }
-  const interaction = response as {
-    status?: string;
-    output_text?: string;
+  const requestSignal = createRequestSignal(params.signal, timeoutMs);
+  const fetchOptions: GeminiFetchOptions = {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-goog-api-key": config.apiKey
+    },
+    body: JSON.stringify(body),
+    signal: requestSignal.signal,
+    ...(proxyDispatcher ? { dispatcher: proxyDispatcher } : {})
   };
-  const status = interaction.status ?? "unknown";
+
+  let payload: GeminiGenerateContentResponse;
+  try {
+    const response = await fetch(
+      `${baseURL}/models/${encodeURIComponent(model)}:generateContent`,
+      fetchOptions
+    );
+    if (!response.ok) throw geminiHttpError(response.status);
+    try {
+      payload = (await response.json()) as GeminiGenerateContentResponse;
+    } catch {
+      throw new ServiceError("Gemini 返回了无法解析的响应。", {
+        statusCode: 502,
+        code: "AI_RESPONSE_INVALID"
+      });
+    }
+  } finally {
+    requestSignal.cleanup();
+    await proxyDispatcher?.close().catch(() => undefined);
+  }
+
+  const finishReason = payload.candidates?.[0]?.finishReason ?? "unknown";
   const metadata: ChatCompletionResponseMetadata = {
-    api: "gemini_interactions",
-    status,
-    ...(status === "completed" ? {} : { incompleteReason: status }),
+    api: "gemini_generate_content",
+    status: finishReason === "STOP" ? "completed" : "incomplete",
+    finishReason,
+    ...(finishReason === "STOP" ? {} : { incompleteReason: finishReason }),
     structuredOutputMode: params.jsonSchema
       ? "native_json_schema"
       : "none"
   };
   notifyMetadata(params, metadata);
-  assertCompleted(status);
 
-  const text = interaction.output_text?.trim() ?? "";
+  const blockReason = payload.promptFeedback?.blockReason;
+  if (blockReason) {
+    throw new ServiceError("Gemini 因安全策略未返回可用结果。", {
+      statusCode: 422,
+      code: "AI_RESPONSE_BLOCKED",
+      details: { normalizedValue: blockReason }
+    });
+  }
+  assertCompleteFinishReason(finishReason);
+
+  const text = (payload.candidates?.[0]?.content?.parts ?? [])
+    .filter((part) => !part.thought && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("")
+    .trim();
   if (!text) {
     throw new ServiceError("Gemini 返回内容为空，请重试。", {
       statusCode: 502,
